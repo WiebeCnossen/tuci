@@ -36,7 +36,8 @@ impl App {
     pub fn attach_engine(&mut self, engine: UciEngine) {
         engine.set_position_fen(&self.position.fen);
         self.engine = Some(engine);
-        self.status = "Ready. Commands: fen <FEN>, move [uci], go [args], stop, quit".into();
+        self.status =
+            "Ready. Enter FEN, UCI move, or: fen/move/go/stop/quit (empty = best move)".into();
     }
 
     pub fn engine_ready(&self) -> bool {
@@ -81,20 +82,12 @@ impl App {
 
     pub fn submit_input(&mut self) -> Result<()> {
         let raw = std::mem::take(&mut self.input);
-        let line = raw.trim();
-        if line.is_empty() {
-            return Ok(());
-        }
+        let line = expand_input_shorthand(raw.trim());
 
         if line.to_ascii_lowercase().starts_with("fen ") {
             let fen = line[4..].trim();
             let position = Position::from_fen(fen)?;
             return self.apply_new_position(position, "");
-        }
-
-        if !line.contains(' ') && line.contains('/') {
-            let position = Position::from_fen(line)?;
-            return self.apply_new_position(position, " (bare FEN)");
         }
 
         if line.eq_ignore_ascii_case("move") {
@@ -149,7 +142,7 @@ impl App {
         }
 
         Err(anyhow!(
-            "Unknown command. Use: fen <FEN>, move [uci], go [args], stop, quit"
+            "Unknown command. Use FEN, UCI move, fen/move/go/stop/quit (empty = best move)"
         ))
     }
 
@@ -177,6 +170,58 @@ impl App {
         self.status = format!("Position updated{label}; sent stop, position, go infinite");
         Ok(())
     }
+}
+
+/// Expand shorthand input: empty → `move`, UCI-like → `move …`, FEN-like → `fen …`.
+fn expand_input_shorthand(line: &str) -> String {
+    if line.is_empty() {
+        return "move".into();
+    }
+    if is_explicit_command(line) {
+        return line.into();
+    }
+    if looks_like_uci_move(line) {
+        return format!("move {line}");
+    }
+    if looks_like_fen(line) {
+        return format!("fen {line}");
+    }
+    line.into()
+}
+
+fn is_explicit_command(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower == "quit"
+        || lower == "exit"
+        || lower == "stop"
+        || lower == "go"
+        || lower.starts_with("go ")
+        || lower == "move"
+        || lower.starts_with("move ")
+        || lower == "fen"
+        || lower.starts_with("fen ")
+}
+
+/// UCI coordinate move: `e2e4`, `e7e8q`, etc.
+fn looks_like_uci_move(line: &str) -> bool {
+    let bytes = line.to_ascii_lowercase().into_bytes();
+    if bytes.len() < 4 || bytes.len() > 5 {
+        return false;
+    }
+    let file = |b: u8| (b'a'..=b'h').contains(&b);
+    let rank = |b: u8| (b'1'..=b'8').contains(&b);
+    file(bytes[0])
+        && rank(bytes[1])
+        && file(bytes[2])
+        && rank(bytes[3])
+        && (bytes.len() == 4 || (bytes.len() == 5 && matches!(bytes[4], b'q' | b'r' | b'b' | b'n')))
+}
+
+/// At least one FEN field (board placement contains `/`).
+fn looks_like_fen(line: &str) -> bool {
+    line.split_whitespace()
+        .next()
+        .is_some_and(|part| part.contains('/'))
 }
 
 fn should_skip_info_properties(line: &str) -> bool {
@@ -290,6 +335,33 @@ fn parse_score_tokens(tokens: &[&str], i: &mut usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_input_shorthand_examples() {
+        assert_eq!(expand_input_shorthand(""), "move");
+        assert_eq!(expand_input_shorthand("e2e4"), "move e2e4");
+        assert_eq!(expand_input_shorthand("e7e8q"), "move e7e8q");
+        assert_eq!(
+            expand_input_shorthand("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
+            "fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
+        );
+        assert_eq!(expand_input_shorthand("go depth 10"), "go depth 10");
+        assert_eq!(expand_input_shorthand("move d2d4"), "move d2d4");
+        assert_eq!(
+            expand_input_shorthand("fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w"),
+            "fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w"
+        );
+    }
+
+    #[test]
+    fn looks_like_uci_move_and_fen() {
+        assert!(looks_like_uci_move("e2e4"));
+        assert!(looks_like_uci_move("E7E8Q"));
+        assert!(!looks_like_uci_move("go"));
+        assert!(!looks_like_uci_move("e2e"));
+        assert!(looks_like_fen("8/8/8/8/4k3/8/4K3/8"));
+        assert!(!looks_like_fen("e2e4"));
+    }
 
     #[test]
     fn clear_engine_properties_resets_info_and_pv() {
