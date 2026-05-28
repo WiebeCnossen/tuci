@@ -36,7 +36,7 @@ impl App {
     pub fn attach_engine(&mut self, engine: UciEngine) {
         engine.set_position_fen(&self.position.fen);
         self.engine = Some(engine);
-        self.status = "Ready. Commands: fen <FEN>, go [args], stop, quit".into();
+        self.status = "Ready. Commands: fen <FEN>, move [uci], go [args], stop, quit".into();
     }
 
     pub fn engine_ready(&self) -> bool {
@@ -97,6 +97,28 @@ impl App {
             return self.apply_new_position(position, " (bare FEN)");
         }
 
+        if line.eq_ignore_ascii_case("move") {
+            let uci_move = self
+                .engine_info
+                .get("bestmove")
+                .ok_or_else(|| {
+                    anyhow!(
+                        "no bestmove available; specify a move (e.g. move e2e4) or wait for engine output"
+                    )
+                })?;
+            let position = self.position.apply_uci_move(uci_move)?;
+            return self.apply_new_position(position, &format!(" (move {uci_move})"));
+        }
+
+        if line.len() > 5 && line[..5].eq_ignore_ascii_case("move ") {
+            let uci_move = line[5..].trim();
+            if uci_move.is_empty() {
+                return Err(anyhow!("move requires a UCI move (e.g. move e2e4)"));
+            }
+            let position = self.position.apply_uci_move(uci_move)?;
+            return self.apply_new_position(position, &format!(" (move {uci_move})"));
+        }
+
         let Some(engine) = self.engine.as_ref() else {
             return Err(anyhow!("Engine is still starting"));
         };
@@ -127,7 +149,7 @@ impl App {
         }
 
         Err(anyhow!(
-            "Unknown command. Use: fen <FEN>, go [args], stop, quit"
+            "Unknown command. Use: fen <FEN>, move [uci], go [args], stop, quit"
         ))
     }
 

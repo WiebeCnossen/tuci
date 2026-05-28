@@ -1,4 +1,7 @@
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
+use shakmaty::fen::Fen;
+use shakmaty::uci::UciMove;
+use shakmaty::{CastlingMode, Chess, EnPassantMode, Position as ShakPosition};
 
 const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -69,6 +72,25 @@ impl Position {
     pub fn board(&self) -> &[[char; 8]; 8] {
         &self.board
     }
+
+    /// Apply a move in UCI notation (e.g. `e2e4`, `e7e8q`) and return the resulting position.
+    pub fn apply_uci_move(&self, uci_move: &str) -> Result<Self> {
+        let fen: Fen = self.fen.parse().map_err(|e| anyhow!("invalid FEN: {e}"))?;
+        let pos: Chess = fen
+            .into_position(CastlingMode::Standard)
+            .map_err(|e| anyhow!("invalid position: {e}"))?;
+        let uci: UciMove = uci_move
+            .parse()
+            .map_err(|e| anyhow!("invalid UCI move: {e}"))?;
+        let chess_move = uci
+            .to_move(&pos)
+            .map_err(|e| anyhow!("illegal move {uci_move}: {e}"))?;
+        let new_pos = pos
+            .play(&chess_move)
+            .map_err(|e| anyhow!("illegal move {uci_move}: {e}"))?;
+        let new_fen = Fen::from_position(new_pos, EnPassantMode::Legal);
+        Self::from_fen(&new_fen.to_string())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,5 +147,17 @@ mod tests {
     fn from_fen_pads_before_parse() {
         let pos = Position::from_fen(BOARD).unwrap();
         assert_eq!(pos.fen, format!("{BOARD} w - - 0 1"));
+    }
+
+    #[test]
+    fn apply_uci_move_e2e4() {
+        let start = Position::default();
+        let after = start.apply_uci_move("e2e4").unwrap();
+        assert!(
+            after
+                .fen
+                .starts_with("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR")
+        );
+        assert!(after.fen.contains(" b "));
     }
 }
