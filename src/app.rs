@@ -7,74 +7,54 @@ use crate::uci::UciEngine;
 
 const MAX_ENGINE_LINES: usize = 5_000;
 
-pub struct App {
-    pub position: Position,
-    /// Chronological positions; the last entry is always the current position.
-    position_history: Vec<Position>,
-    pub engine_lines: Vec<String>,
-    pub engine_info: BTreeMap<String, String>,
-    pub input: String,
-    pub status: String,
-    pub should_quit: bool,
-    pub engine_tile_visible: bool,
-    engine: Option<UciEngine>,
-    /// First move of the current principal variation (for `bestmovetime`).
+pub struct EngineState {
+    pub name: String,
+    pub lines: Vec<String>,
+    pub info: BTreeMap<String, String>,
     pv_first_move: Option<String>,
+    engine: Option<UciEngine>,
 }
 
-impl App {
-    pub fn new() -> Self {
-        let position = Position::default();
+impl EngineState {
+    fn new(name: String) -> Self {
         Self {
-            position: position.clone(),
-            position_history: vec![position],
-            engine_lines: Vec::new(),
-            engine_info: BTreeMap::new(),
-            input: String::new(),
-            status: "Starting engine…".into(),
-            should_quit: false,
-            engine_tile_visible: false,
-            engine: None,
+            name,
+            lines: Vec::new(),
+            info: BTreeMap::new(),
             pv_first_move: None,
+            engine: None,
         }
     }
 
-    pub fn attach_engine(&mut self, engine: UciEngine) {
-        engine.set_position_fen(&self.position.fen);
-        self.engine = Some(engine);
-        self.status =
-            "Ready. Enter FEN, UCI move, or: fen/move/back/-/go/stop/quit (empty = best move)"
-                .into();
+    fn clear_properties(&mut self) {
+        self.info.clear();
+        self.pv_first_move = None;
     }
 
-    pub fn engine_ready(&self) -> bool {
-        self.engine.is_some()
-    }
-
-    pub fn push_engine_lines(&mut self, lines: &[String]) {
+    fn push_lines(&mut self, lines: &[String]) {
         if lines.is_empty() {
             return;
         }
         for line in lines {
             if line.starts_with("info ") && !should_skip_info_properties(line) {
-                parse_info_line(line, &mut self.engine_info, &mut self.pv_first_move);
+                parse_info_line(line, &mut self.info, &mut self.pv_first_move);
             }
         }
-        self.engine_lines.extend_from_slice(lines);
-        if self.engine_lines.len() > MAX_ENGINE_LINES {
-            let excess = self.engine_lines.len() - MAX_ENGINE_LINES;
-            self.engine_lines.drain(..excess);
+        self.lines.extend_from_slice(lines);
+        if self.lines.len() > MAX_ENGINE_LINES {
+            let excess = self.lines.len() - MAX_ENGINE_LINES;
+            self.lines.drain(..excess);
         }
     }
 
     /// Most recent wrapped display rows that fit in `height` terminal rows.
-    pub fn visible_engine_display_lines(&self, height: usize, width: usize) -> Vec<String> {
-        if self.engine_lines.is_empty() || height == 0 || width == 0 {
+    fn visible_display_lines(&self, height: usize, width: usize) -> Vec<String> {
+        if self.lines.is_empty() || height == 0 || width == 0 {
             return Vec::new();
         }
 
         let mut visible = Vec::with_capacity(height);
-        for line in self.engine_lines.iter().rev() {
+        for line in self.lines.iter().rev() {
             for row in wrap_line(line, width).into_iter().rev() {
                 visible.push(row);
                 if visible.len() == height {
@@ -85,6 +65,66 @@ impl App {
         }
         visible.reverse();
         visible
+    }
+}
+
+pub struct App {
+    pub position: Position,
+    /// Chronological positions; the last entry is always the current position.
+    position_history: Vec<Position>,
+    pub engines: Vec<EngineState>,
+    pub input: String,
+    pub status: String,
+    pub should_quit: bool,
+    pub engine_tile_visible: bool,
+}
+
+impl App {
+    pub fn new(engine_names: Vec<String>) -> Self {
+        let position = Position::default();
+        Self {
+            position: position.clone(),
+            position_history: vec![position],
+            engines: engine_names.into_iter().map(EngineState::new).collect(),
+            input: String::new(),
+            status: "Starting engines…".into(),
+            should_quit: false,
+            engine_tile_visible: false,
+        }
+    }
+
+    pub fn attach_engine(&mut self, index: usize, engine: UciEngine) {
+        if let Some(slot) = self.engines.get_mut(index) {
+            engine.set_position_fen(&self.position.fen);
+            slot.engine = Some(engine);
+        }
+        self.update_ready_status();
+    }
+
+    pub fn engines_ready(&self) -> bool {
+        !self.engines.is_empty() && self.engines.iter().all(|e| e.engine.is_some())
+    }
+
+    pub fn any_engine_ready(&self) -> bool {
+        self.engines.iter().any(|e| e.engine.is_some())
+    }
+
+    pub fn push_engine_lines(&mut self, index: usize, lines: &[String]) {
+        if let Some(slot) = self.engines.get_mut(index) {
+            slot.push_lines(lines);
+        }
+    }
+
+    pub fn visible_engine_display_lines(
+        &self,
+        index: usize,
+        height: usize,
+        width: usize,
+    ) -> Vec<String> {
+        self.engines
+            .get(index)
+            .map(|slot| slot.visible_display_lines(height, width))
+            .unwrap_or_default()
     }
 
     pub fn submit_input(&mut self) -> Result<()> {
@@ -99,8 +139,9 @@ impl App {
 
         if line.eq_ignore_ascii_case("move") {
             let uci_move = self
-                .engine_info
-                .get("bestmove")
+                .engines
+                .first()
+                .and_then(|e| e.info.get("bestmove"))
                 .ok_or_else(|| {
                     anyhow!(
                         "no bestmove available; specify a move (e.g. move e2e4) or wait for engine output"
@@ -155,27 +196,35 @@ impl App {
             return Ok(());
         }
 
-        let Some(engine) = self.engine.as_ref() else {
-            return Err(anyhow!("Engine is still starting"));
-        };
+        if !self.engines_ready() {
+            return Err(anyhow!("Engines are still starting"));
+        }
 
         if line.eq_ignore_ascii_case("quit") || line.eq_ignore_ascii_case("exit") {
-            engine.quit();
+            self.quit_all_engines();
             self.should_quit = true;
             self.status = "Quitting…".into();
             return Ok(());
         }
 
         if line.eq_ignore_ascii_case("stop") {
-            engine.stop();
+            for slot in &self.engines {
+                if let Some(engine) = &slot.engine {
+                    engine.stop();
+                }
+            }
             self.status = "Sent: stop".into();
             return Ok(());
         }
 
         if line.eq_ignore_ascii_case("go") || line.to_ascii_lowercase().starts_with("go ") {
             let args = line.strip_prefix("go").unwrap_or("").trim();
-            self.pv_first_move = None;
-            engine.go(args);
+            for slot in &mut self.engines {
+                slot.pv_first_move = None;
+                if let Some(engine) = &slot.engine {
+                    engine.go(args);
+                }
+            }
             self.status = if args.is_empty() {
                 "Sent: go infinite".into()
             } else {
@@ -189,36 +238,60 @@ impl App {
         ))
     }
 
-    pub fn engine(&self) -> Option<&UciEngine> {
-        self.engine.as_ref()
+    pub fn quit_all_engines(&self) {
+        for slot in &self.engines {
+            if let Some(engine) = &slot.engine {
+                engine.quit();
+            }
+        }
     }
 
-    fn clear_engine_properties(&mut self) {
-        self.engine_info.clear();
-        self.pv_first_move = None;
+    fn update_ready_status(&mut self) {
+        let ready = self.engines.iter().filter(|e| e.engine.is_some()).count();
+        let total = self.engines.len();
+        if ready == total {
+            self.status =
+                "Ready. Enter FEN, UCI move, or: fen/move/back/-/go/stop/quit (empty = best move)"
+                    .into();
+        } else {
+            self.status = format!("Starting engines… ({ready}/{total} ready)");
+        }
+    }
+
+    fn clear_all_engine_properties(&mut self) {
+        for slot in &mut self.engines {
+            slot.clear_properties();
+        }
     }
 
     /// Stop search, discard prior engine info, set position, and start analysis.
     fn apply_new_position(&mut self, position: Position, label: &str) -> Result<()> {
         append_position_history(&mut self.position_history, position.clone());
-        self.set_position_on_engine(position, label)
+        self.set_position_on_engines(position, label)
     }
 
     fn go_back(&mut self, steps: usize) -> Result<()> {
-        if self.engine.is_none() {
-            return Err(anyhow!("Engine is still starting"));
+        if !self.engines_ready() {
+            return Err(anyhow!("Engines are still starting"));
         }
         let (position, steps) = rewind_position_history(&mut self.position_history, steps)?;
-        self.set_position_on_engine(position, &format!(" (back {steps})"))
+        self.set_position_on_engines(position, &format!(" (back {steps})"))
     }
 
-    fn set_position_on_engine(&mut self, position: Position, label: &str) -> Result<()> {
+    fn set_position_on_engines(&mut self, position: Position, label: &str) -> Result<()> {
         let fen = position.fen.clone();
-        self.engine.as_ref().unwrap().stop();
-        self.clear_engine_properties();
-        let engine = self.engine.as_ref().unwrap();
-        engine.set_position_fen(&fen);
-        engine.go("");
+        for slot in &self.engines {
+            if let Some(engine) = &slot.engine {
+                engine.stop();
+            }
+        }
+        self.clear_all_engine_properties();
+        for slot in &self.engines {
+            if let Some(engine) = &slot.engine {
+                engine.set_position_fen(&fen);
+                engine.go("");
+            }
+        }
         self.position = position;
         self.status = format!("Position updated{label}; sent stop, position, go infinite");
         Ok(())
@@ -415,6 +488,10 @@ fn parse_score_tokens(tokens: &[&str], i: &mut usize) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn test_app() -> App {
+        App::new(vec!["Engine".into()])
+    }
+
     #[test]
     fn expand_input_shorthand_examples() {
         assert_eq!(expand_input_shorthand(""), "move");
@@ -446,12 +523,12 @@ mod tests {
 
     #[test]
     fn clear_engine_properties_resets_info_and_pv() {
-        let mut app = App::new();
-        app.engine_info.insert("depth".into(), "10".into());
-        app.pv_first_move = Some("e2e4".into());
-        app.clear_engine_properties();
-        assert!(app.engine_info.is_empty());
-        assert!(app.pv_first_move.is_none());
+        let mut app = test_app();
+        app.engines[0].info.insert("depth".into(), "10".into());
+        app.engines[0].pv_first_move = Some("e2e4".into());
+        app.engines[0].clear_properties();
+        assert!(app.engines[0].info.is_empty());
+        assert!(app.engines[0].pv_first_move.is_none());
     }
 
     #[test]
@@ -480,20 +557,23 @@ mod tests {
 
     #[test]
     fn push_engine_lines_skips_info_properties_for_info_string_only() {
-        let mut app = App::new();
-        app.push_engine_lines(&[
-            "info string debug msg".into(),
-            "info depth 10 score cp 50 upperbound pv e2e4 e7e5".into(),
-            "info depth 5 nodes 100".into(),
-        ]);
-        assert_eq!(app.engine_lines.len(), 3);
-        assert_eq!(app.engine_info.get("depth"), Some(&"5".into()));
+        let mut app = test_app();
+        app.push_engine_lines(
+            0,
+            &[
+                "info string debug msg".into(),
+                "info depth 10 score cp 50 upperbound pv e2e4 e7e5".into(),
+                "info depth 5 nodes 100".into(),
+            ],
+        );
+        assert_eq!(app.engines[0].lines.len(), 3);
+        assert_eq!(app.engines[0].info.get("depth"), Some(&"5".into()));
         assert_eq!(
-            app.engine_info.get("score"),
+            app.engines[0].info.get("score"),
             Some(&"cp 50 upperbound".into())
         );
-        assert_eq!(app.engine_info.get("bestmove"), Some(&"e2e4".into()));
-        assert_eq!(app.engine_info.get("pv"), None);
+        assert_eq!(app.engines[0].info.get("bestmove"), Some(&"e2e4".into()));
+        assert_eq!(app.engines[0].info.get("pv"), None);
     }
 
     #[test]
@@ -616,9 +696,9 @@ mod tests {
 
     #[test]
     fn visible_engine_display_lines_shows_wrapped_tail() {
-        let mut app = App::new();
-        app.push_engine_lines(&["short".into(), "0123456789".into()]);
-        let visible = app.visible_engine_display_lines(3, 4);
+        let mut app = test_app();
+        app.push_engine_lines(0, &["short".into(), "0123456789".into()]);
+        let visible = app.visible_engine_display_lines(0, 3, 4);
         assert_eq!(visible, vec!["0123", "4567", "89"]);
     }
 }

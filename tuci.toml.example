@@ -1,8 +1,15 @@
 # Copy to tuci.toml and adjust paths for your machine.
 
-[engine]
-path = 'C:\chess\uciprogram.exe'
+[[engines]]
+path = 'C:\chess\stockfish.exe'
+name = "Stockfish"
 
-[options]
+[engines.options]
 Hash = 1024
 Threads = 4
+
+[[engines]]
+path = 'C:\chess\other.exe'
+
+[engines.options]
+Hash = 512

@@ -40,15 +40,11 @@ pub fn draw(terminal: &mut TuiTerminal, app: &crate::app::App) -> Result<()> {
 pub fn handle_key(key: crossterm::event::KeyEvent, app: &mut crate::app::App) -> Result<()> {
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(engine) = app.engine() {
-                engine.quit();
-            }
+            app.quit_all_engines();
             app.should_quit = true;
         }
         KeyCode::Esc => {
-            if let Some(engine) = app.engine() {
-                engine.quit();
-            }
+            app.quit_all_engines();
             app.should_quit = true;
         }
         KeyCode::Enter => {

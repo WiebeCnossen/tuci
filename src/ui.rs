@@ -104,10 +104,36 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_position(frame, top_row[0], app);
     draw_command(frame, top_row[1], app);
-    draw_properties(frame, chunks[1], app);
+
+    let engine_count = app.engines.len().max(1);
+    let engine_columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![
+            Constraint::Ratio(1, engine_count as u32);
+            engine_count
+        ])
+        .split(chunks[1]);
+
+    for (index, column) in engine_columns.iter().enumerate() {
+        if let Some(engine) = app.engines.get(index) {
+            draw_properties(frame, *column, engine);
+        }
+    }
 
     if app.engine_tile_visible {
-        draw_engine_output(frame, chunks[2], app);
+        let engine_output_columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![
+                Constraint::Ratio(1, engine_count as u32);
+                engine_count
+            ])
+            .split(chunks[2]);
+
+        for (index, column) in engine_output_columns.iter().enumerate() {
+            if let Some(engine) = app.engines.get(index) {
+                draw_engine_output(frame, *column, app, index, &engine.name);
+            }
+        }
     }
 }
 
@@ -167,17 +193,17 @@ fn draw_position(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_properties(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_properties(frame: &mut Frame, area: Rect, engine: &crate::app::EngineState) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let mut lines = Vec::new();
 
-    if app.engine_info.is_empty() {
+    if engine.info.is_empty() {
         lines.push(Line::from(Span::styled(
             "(no engine properties yet)",
             Style::default().fg(Color::DarkGray),
         )));
     } else {
-        for (key, value) in engine_info_display_keys(&app.engine_info) {
+        for (key, value) in engine_info_display_keys(&engine.info) {
             let display = format_property_value(value);
             for row in wrap_line(&format!("{key}: {display}"), inner_width.max(1)) {
                 lines.push(Line::from(Span::raw(row)));
@@ -186,7 +212,7 @@ fn draw_properties(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let block = Block::default()
-        .title(" Properties ")
+        .title(format!(" {} ", engine.name))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
 
@@ -194,10 +220,10 @@ fn draw_properties(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_engine_output(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_engine_output(frame: &mut Frame, area: Rect, app: &App, index: usize, _name: &str) {
     let inner_height = area.height.saturating_sub(2).min(ENGINE_INNER_LINES) as usize;
     let inner_width = area.width.saturating_sub(2) as usize;
-    let visible = app.visible_engine_display_lines(inner_height, inner_width);
+    let visible = app.visible_engine_display_lines(index, inner_height, inner_width);
 
     let lines: Vec<Line> = visible
         .into_iter()
@@ -205,7 +231,7 @@ fn draw_engine_output(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let block = Block::default()
-        .title(" Engine ")
+        .title(" Console ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
 
@@ -279,7 +305,7 @@ mod tests {
 
     #[test]
     fn position_tile_size_matches_board() {
-        let app = crate::app::App::new();
+        let app = crate::app::App::new(vec!["Engine".into()]);
         assert_eq!(position_tile_size(&app), (21, 11));
     }
 

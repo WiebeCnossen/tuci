@@ -17,7 +17,8 @@ impl UciEngine {
     pub async fn spawn(
         engine_path: &Path,
         options: &[(String, String)],
-        output_tx: mpsc::UnboundedSender<String>,
+        engine_index: usize,
+        output_tx: mpsc::UnboundedSender<(usize, String)>,
     ) -> Result<Self> {
         let mut child = Command::new(engine_path)
             .stdin(Stdio::piped())
@@ -37,20 +38,17 @@ impl UciEngine {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
-                let _ = out.send(line);
+                let _ = out.send((engine_index, line));
             }
         });
 
         if let Some(stderr) = stderr {
-            let out = output_tx;
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = out.send(format!("[stderr] {line}"));
+                    let _ = output_tx.send((engine_index, format!("[stderr] {line}")));
                 }
             });
-        } else {
-            drop(output_tx);
         }
 
         let (command_tx, command_rx) = mpsc::unbounded_channel::<String>();

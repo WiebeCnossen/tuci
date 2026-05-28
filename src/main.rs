@@ -6,12 +6,10 @@ mod terminal;
 mod uci;
 mod ui;
 
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use crossterm::event::EventStream;
 use futures::StreamExt;
@@ -34,60 +32,109 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli.config).await?;
-    let options: Vec<(String, String)> = config.options.into_iter().collect();
+    let engine_names = config.engine_display_names();
 
-    let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
-    let engine_path = config.engine.path.clone();
-    let mut spawn_engine = Box::pin(UciEngine::spawn(&engine_path, &options, engine_tx));
+    let (output_tx, mut output_rx) = mpsc::unbounded_channel::<(usize, String)>();
+    let (ready_tx, mut ready_rx) = mpsc::unbounded_channel::<(usize, UciEngine)>();
+
+    for (index, engine_config) in config.engines.iter().enumerate() {
+        let options: Vec<(String, String)> = engine_config
+            .options
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let path = engine_config.path.clone();
+        let output_tx = output_tx.clone();
+        let ready_tx = ready_tx.clone();
+
+        tokio::spawn(async move {
+            match UciEngine::spawn(&path, &options, index, output_tx.clone()).await {
+                Ok(engine) => {
+                    let _ = ready_tx.send((index, engine));
+                }
+                Err(err) => {
+                    let _ = output_tx
+                        .send((index, format!("[stderr] failed to start engine: {err:#}")));
+                }
+            }
+        });
+    }
+    drop(output_tx);
+    drop(ready_tx);
 
     let mut terminal = terminal::setup().await?;
-    let mut app = App::new();
+    let mut app = App::new(engine_names);
 
-    let result = run_loop(&mut terminal, &mut app, &mut engine_rx, &mut spawn_engine).await;
+    let result = run_loop(&mut terminal, &mut app, &mut output_rx, &mut ready_rx).await;
 
-    if let Some(engine) = app.engine() {
-        engine.quit();
-    }
+    app.quit_all_engines();
     terminal::restore(terminal).await?;
     result
+}
+
+const ENGINE_OUTPUT_DRAIN_LIMIT: usize = 256;
+
+fn drain_engine_output(
+    output_rx: &mut mpsc::UnboundedReceiver<(usize, String)>,
+    app: &mut App,
+) -> bool {
+    let mut changed = false;
+    for _ in 0..ENGINE_OUTPUT_DRAIN_LIMIT {
+        match output_rx.try_recv() {
+            Ok((index, line)) => {
+                app.push_engine_lines(index, &[line]);
+                changed = true;
+            }
+            Err(mpsc::error::TryRecvError::Empty) => break,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                app.status = if app.any_engine_ready() {
+                    "All engines disconnected".into()
+                } else {
+                    "All engines disconnected during startup".into()
+                };
+                return true;
+            }
+        }
+    }
+    changed
+}
+
+fn drain_engine_ready(ready_rx: &mut mpsc::UnboundedReceiver<(usize, UciEngine)>, app: &mut App) {
+    while let Ok((index, engine)) = ready_rx.try_recv() {
+        app.attach_engine(index, engine);
+    }
 }
 
 async fn run_loop(
     terminal: &mut TuiTerminal,
     app: &mut App,
-    engine_rx: &mut mpsc::UnboundedReceiver<String>,
-    spawn_engine: &mut Pin<Box<impl Future<Output = Result<UciEngine>>>>,
+    output_rx: &mut mpsc::UnboundedReceiver<(usize, String)>,
+    ready_rx: &mut mpsc::UnboundedReceiver<(usize, UciEngine)>,
 ) -> Result<()> {
     let mut events = EventStream::new();
     let mut redraw = tokio::time::interval(Duration::from_millis(16));
     redraw.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut engine_batch = Vec::with_capacity(512);
+    let mut needs_redraw = true;
 
     loop {
+        drain_engine_ready(ready_rx, app);
+        if drain_engine_output(output_rx, app) {
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
+            terminal::draw(terminal, app)?;
+            needs_redraw = false;
+        }
+
         tokio::select! {
             biased;
 
-            count = engine_rx.recv_many(&mut engine_batch, 512) => {
-                match count {
-                    0 if !app.engine_ready() => {
-                        app.status = "Engine disconnected during startup".into();
-                    }
-                    0 => app.status = "Engine disconnected".into(),
-                    _ => app.push_engine_lines(&engine_batch[..count]),
-                }
-                engine_batch.clear();
-                terminal::draw(terminal, app)?;
-            }
-            result = spawn_engine.as_mut(), if !app.engine_ready() => {
-                let engine = result.context("starting UCI engine")?;
-                app.attach_engine(engine);
-                terminal::draw(terminal, app)?;
-            }
             event = events.next() => {
                 match event {
                     Some(Ok(crossterm::event::Event::Key(key))) if key.kind == crossterm::event::KeyEventKind::Press => {
                         terminal::handle_key(key, app)?;
-                        terminal::draw(terminal, app)?;
+                        needs_redraw = true;
                     }
                     Some(Ok(_)) => {}
                     Some(Err(err)) => return Err(err.into()),
@@ -95,7 +142,7 @@ async fn run_loop(
                 }
             }
             _ = redraw.tick() => {
-                terminal::draw(terminal, app)?;
+                needs_redraw = true;
             }
         }
 
