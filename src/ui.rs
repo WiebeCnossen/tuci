@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::App;
+use crate::fen::{PieceColor, piece_glyph};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -23,13 +24,36 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_input(frame, chunks[1], app);
 }
 
+fn piece_style(color: PieceColor) -> Style {
+    match color {
+        PieceColor::White => Style::default().fg(Color::LightYellow),
+        PieceColor::Black => Style::default().fg(Color::LightCyan),
+    }
+}
+
 fn draw_board(frame: &mut Frame, area: Rect, app: &App) {
-    let lines: Vec<Line> = app
-        .position
-        .board_lines()
-        .into_iter()
-        .map(|s| Line::from(Span::raw(s)))
-        .collect();
+    let mut lines = vec![Line::from(Span::raw("  a b c d e f g h"))];
+
+    for (row_idx, row) in app.position.board().iter().enumerate() {
+        let rank = 8 - row_idx;
+        let mut spans = vec![Span::raw(format!("{rank} "))];
+        for (file, &piece) in row.iter().enumerate() {
+            if file > 0 {
+                spans.push(Span::raw(" "));
+            }
+            match piece_glyph(piece) {
+                Some((glyph, color)) => {
+                    spans.push(Span::styled(glyph, piece_style(color)));
+                }
+                None => spans.push(Span::raw("·")),
+            }
+        }
+        spans.push(Span::raw(format!(" {rank}")));
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(Span::raw(format!("FEN: {}", app.position.fen))));
 
     let block = Block::default()
         .title(" Position ")

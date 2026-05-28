@@ -54,38 +54,32 @@ impl Position {
         })
     }
 
-    pub fn board_lines(&self) -> Vec<String> {
-        let mut lines = Vec::with_capacity(10);
-        lines.push("  a b c d e f g h".to_string());
-        for (row_idx, row) in self.board.iter().enumerate() {
-            let rank = 8 - row_idx;
-            let squares: Vec<String> = row
-                .iter()
-                .map(|&piece| piece_symbol(piece).to_string())
-                .collect();
-            lines.push(format!("{rank} {} {rank}", squares.join(" ")));
-        }
-        lines.push(String::new());
-        lines.push(format!("FEN: {}", self.fen));
-        lines
+    pub fn board(&self) -> &[[char; 8]; 8] {
+        &self.board
     }
 }
 
-fn piece_symbol(piece: char) -> &'static str {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PieceColor {
+    White,
+    Black,
+}
+
+pub fn piece_glyph(piece: char) -> Option<(&'static str, PieceColor)> {
     match piece {
-        'K' => "♔",
-        'Q' => "♕",
-        'R' => "♖",
-        'B' => "♗",
-        'N' => "♘",
-        'P' => "♙",
-        'k' => "♚",
-        'q' => "♛",
-        'r' => "♜",
-        'b' => "♝",
-        'n' => "♞",
-        'p' => "♟",
-        ' ' => "·",
-        _ => "?",
+        'K' => Some(("♔", PieceColor::White)),
+        'Q' => Some(("♕", PieceColor::White)),
+        'R' => Some(("♖", PieceColor::White)),
+        'B' => Some(("♗", PieceColor::White)),
+        'N' => Some(("♘", PieceColor::White)),
+        'P' => Some(("♙", PieceColor::White)),
+        'k' => Some(("♔", PieceColor::Black)),
+        'q' => Some(("♕", PieceColor::Black)),
+        'r' => Some(("♖", PieceColor::Black)),
+        'b' => Some(("♗", PieceColor::Black)),
+        'n' => Some(("♘", PieceColor::Black)),
+        'p' => Some(("♙", PieceColor::Black)),
+        ' ' => None,
+        _ => None,
     }
 }
