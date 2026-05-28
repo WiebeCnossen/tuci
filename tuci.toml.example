@@ -1,0 +1,8 @@
+# Copy to tuci.toml and adjust paths for your machine.
+
+[engine]
+path = 'C:\chess\uciprogram.exe'
+
+[options]
+Hash = 1024
+Threads = 4
