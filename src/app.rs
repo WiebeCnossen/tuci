@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Result, anyhow};
 
 use crate::fen::Position;
@@ -8,10 +10,13 @@ const MAX_ENGINE_LINES: usize = 5_000;
 pub struct App {
     pub position: Position,
     pub engine_lines: Vec<String>,
+    pub engine_info: BTreeMap<String, String>,
     pub input: String,
     pub status: String,
     pub should_quit: bool,
     engine: Option<UciEngine>,
+    /// First move of the current principal variation (for `bestmovetime`).
+    pv_first_move: Option<String>,
 }
 
 impl App {
@@ -19,10 +24,12 @@ impl App {
         Self {
             position: Position::default(),
             engine_lines: Vec::new(),
+            engine_info: BTreeMap::new(),
             input: String::new(),
             status: "Starting engine…".into(),
             should_quit: false,
             engine: None,
+            pv_first_move: None,
         }
     }
 
@@ -39,6 +46,11 @@ impl App {
     pub fn push_engine_lines(&mut self, lines: &[String]) {
         if lines.is_empty() {
             return;
+        }
+        for line in lines {
+            if line.starts_with("info ") && !should_skip_info_properties(line) {
+                parse_info_line(line, &mut self.engine_info, &mut self.pv_first_move);
+            }
         }
         self.engine_lines.extend_from_slice(lines);
         if self.engine_lines.len() > MAX_ENGINE_LINES {
@@ -93,6 +105,7 @@ impl App {
 
         if line.eq_ignore_ascii_case("go") || line.to_ascii_lowercase().starts_with("go ") {
             let args = line.strip_prefix("go").unwrap_or("").trim();
+            self.pv_first_move = None;
             engine.go(args);
             self.status = if args.is_empty() {
                 "Sent: go infinite".into()
@@ -106,6 +119,7 @@ impl App {
             let fen = line[4..].trim();
             let position = Position::from_fen(fen)?;
             engine.set_position_fen(&position.fen);
+            self.pv_first_move = None;
             self.position = position;
             self.status = "Position updated".into();
             return Ok(());
@@ -114,6 +128,7 @@ impl App {
         if !line.contains(' ') && line.contains('/') {
             let position = Position::from_fen(line)?;
             engine.set_position_fen(&position.fen);
+            self.pv_first_move = None;
             self.position = position;
             self.status = "Position updated (bare FEN)".into();
             return Ok(());
@@ -129,7 +144,18 @@ impl App {
     }
 }
 
-fn wrap_line(line: &str, width: usize) -> Vec<String> {
+fn should_skip_info_properties(line: &str) -> bool {
+    line.starts_with("info string")
+}
+
+fn has_score_bound(tokens: &[&str]) -> bool {
+    tokens
+        .iter()
+        .any(|t| *t == "lowerbound" || *t == "upperbound")
+}
+
+/// Split `line` into rows of at most `width` columns (character-based).
+pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if line.is_empty() {
         return vec![String::new()];
     }
@@ -149,6 +175,83 @@ fn wrap_line(line: &str, width: usize) -> Vec<String> {
     rows
 }
 
+/// Update `info` with key/value pairs from a UCI `info` line.
+fn parse_info_line(
+    line: &str,
+    info: &mut BTreeMap<String, String>,
+    pv_first_move: &mut Option<String>,
+) {
+    let Some(rest) = line.strip_prefix("info ") else {
+        return;
+    };
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let skip_pv_update = has_score_bound(&tokens);
+    let mut line_time: Option<String> = None;
+    let mut line_pv: Option<String> = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        let key = tokens[i];
+        if key == "pv" {
+            line_pv = Some(tokens[i + 1..].join(" "));
+            break;
+        }
+        if key == "score" {
+            if let Some(value) = parse_score_tokens(&tokens, &mut i) {
+                info.insert("score".into(), value);
+            }
+            continue;
+        }
+        i += 1;
+        if i < tokens.len() {
+            let value = tokens[i].to_string();
+            if key == "time" {
+                line_time = Some(value.clone());
+            }
+            info.insert(key.into(), value);
+            i += 1;
+        }
+    }
+
+    if let Some(pv) = line_pv {
+        if let Some(first_move) = pv.split_whitespace().next() {
+            info.insert("bestmove".into(), first_move.into());
+            if pv_first_move.as_deref() != Some(first_move) {
+                *pv_first_move = Some(first_move.into());
+                if let Some(time) = line_time {
+                    info.insert("bestmovetime".into(), time);
+                }
+            }
+        }
+        if !skip_pv_update {
+            info.insert("pv".into(), pv);
+        }
+    }
+}
+
+/// After `score`, parse `cp N`, `mate N`, or `cp N upperbound|lowerbound`.
+fn parse_score_tokens(tokens: &[&str], i: &mut usize) -> Option<String> {
+    *i += 1;
+    if *i >= tokens.len() {
+        return None;
+    }
+    let kind = tokens[*i];
+    if kind != "cp" && kind != "mate" {
+        return None;
+    }
+    *i += 1;
+    let number = tokens.get(*i)?;
+    *i += 1;
+    let mut value = format!("{kind} {number}");
+    if let Some(bound) = tokens.get(*i)
+        && (*bound == "upperbound" || *bound == "lowerbound")
+    {
+        value.push(' ');
+        value.push_str(bound);
+        *i += 1;
+    }
+    Some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +260,118 @@ mod tests {
     fn wrap_line_splits_long_text() {
         let rows = wrap_line("abcdefghij", 4);
         assert_eq!(rows, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn parse_info_line_extracts_properties() {
+        let mut info = BTreeMap::new();
+        let mut pv_first_move = None;
+        parse_info_line(
+            "info depth 12 seldepth 20 multipv 1 score cp 25 nodes 1000 nps 500000 time 500 pv e2e4 e7e5",
+            &mut info,
+            &mut pv_first_move,
+        );
+        assert_eq!(info.get("bestmovetime"), Some(&"500".into()));
+        assert_eq!(info.get("depth"), Some(&"12".into()));
+        assert_eq!(info.get("seldepth"), Some(&"20".into()));
+        assert_eq!(info.get("score"), Some(&"cp 25".into()));
+        assert_eq!(info.get("bestmove"), Some(&"e2e4".into()));
+        assert_eq!(info.get("nodes"), Some(&"1000".into()));
+        assert_eq!(info.get("pv"), Some(&"e2e4 e7e5".into()));
+    }
+
+    #[test]
+    fn push_engine_lines_skips_info_properties_for_info_string_only() {
+        let mut app = App::new();
+        app.push_engine_lines(&[
+            "info string debug msg".into(),
+            "info depth 10 score cp 50 upperbound pv e2e4 e7e5".into(),
+            "info depth 5 nodes 100".into(),
+        ]);
+        assert_eq!(app.engine_lines.len(), 3);
+        assert_eq!(app.engine_info.get("depth"), Some(&"5".into()));
+        assert_eq!(
+            app.engine_info.get("score"),
+            Some(&"cp 50 upperbound".into())
+        );
+        assert_eq!(app.engine_info.get("bestmove"), Some(&"e2e4".into()));
+        assert_eq!(app.engine_info.get("pv"), None);
+    }
+
+    #[test]
+    fn parse_info_line_upperbound_updates_score_and_bestmove_not_pv() {
+        let mut info = BTreeMap::new();
+        let mut pv_first_move = None;
+        parse_info_line(
+            "info depth 10 score cp 50 upperbound time 100 pv e2e4 e7e5",
+            &mut info,
+            &mut pv_first_move,
+        );
+        assert_eq!(info.get("score"), Some(&"cp 50 upperbound".into()));
+        assert_eq!(info.get("bestmove"), Some(&"e2e4".into()));
+        assert_eq!(info.get("bestmovetime"), Some(&"100".into()));
+        assert_eq!(info.get("pv"), None);
+
+        info.clear();
+        parse_info_line(
+            "info depth 11 score cp 30 pv d2d4 d7d5",
+            &mut info,
+            &mut pv_first_move,
+        );
+        assert_eq!(info.get("pv"), Some(&"d2d4 d7d5".into()));
+        assert_eq!(info.get("bestmove"), Some(&"d2d4".into()));
+    }
+
+    #[test]
+    fn parse_info_line_score_mate() {
+        let mut info = BTreeMap::new();
+        let mut pv_first_move = None;
+        parse_info_line(
+            "info depth 20 score mate 3 pv e2e4",
+            &mut info,
+            &mut pv_first_move,
+        );
+        assert_eq!(info.get("score"), Some(&"mate 3".into()));
+    }
+
+    #[test]
+    fn parse_info_line_pv_is_rest_of_line() {
+        let mut info = BTreeMap::new();
+        let mut pv_first_move = None;
+        parse_info_line(
+            "info depth 1 pv e2e4 e7e5 g1f3",
+            &mut info,
+            &mut pv_first_move,
+        );
+        assert_eq!(info.get("depth"), Some(&"1".into()));
+        assert_eq!(info.get("pv"), Some(&"e2e4 e7e5 g1f3".into()));
+    }
+
+    #[test]
+    fn bestmovetime_updates_when_pv_head_changes() {
+        let mut info = BTreeMap::new();
+        let mut pv_first_move = None;
+
+        parse_info_line(
+            "info depth 10 time 100 pv e2e4",
+            &mut info,
+            &mut pv_first_move,
+        );
+        assert_eq!(info.get("bestmovetime"), Some(&"100".into()));
+
+        parse_info_line(
+            "info depth 11 time 200 pv e2e4 e7e5",
+            &mut info,
+            &mut pv_first_move,
+        );
+        assert_eq!(info.get("bestmovetime"), Some(&"100".into()));
+
+        parse_info_line(
+            "info depth 12 time 300 pv d2d4",
+            &mut info,
+            &mut pv_first_move,
+        );
+        assert_eq!(info.get("bestmovetime"), Some(&"300".into()));
     }
 
     #[test]

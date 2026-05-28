@@ -4,8 +4,67 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::app::App;
+use crate::app::{App, wrap_line};
 use crate::fen::{PieceColor, piece_glyph};
+
+const SI_PREFIXES: [&str; 8] = ["", "k", "M", "G", "T", "P", "E", "Z"];
+
+/// Format an integer with at most 3 significant digits and SI suffixes (k, M, G, …).
+fn format_si_number(n: i64) -> String {
+    let sign = if n < 0 { "-" } else { "" };
+    let n = n.unsigned_abs();
+
+    if n < 1000 {
+        return format!("{sign}{n}");
+    }
+
+    let mut tier = 0usize;
+    let mut divisor = 1u64;
+    while n >= divisor.saturating_mul(1000) && tier + 1 < SI_PREFIXES.len() {
+        divisor = divisor.saturating_mul(1000);
+        tier += 1;
+    }
+
+    let mut mantissa = n as f64 / divisor as f64;
+    let order = mantissa.log10().floor();
+    let scale = 10f64.powf(2.0 - order);
+    mantissa = (mantissa * scale).round() / scale;
+
+    if mantissa >= 1000.0 && tier + 1 < SI_PREFIXES.len() {
+        tier += 1;
+        mantissa /= 1000.0;
+    }
+
+    let int_digits = if mantissa >= 100.0 {
+        3
+    } else if mantissa >= 10.0 {
+        2
+    } else {
+        1
+    };
+    let frac_digits = 3 - int_digits;
+    let multiplier = 10u64.pow(frac_digits);
+    let scaled = (mantissa * multiplier as f64).round() as u64;
+    let int_part = scaled / multiplier;
+    let mut frac_part = scaled % multiplier;
+
+    let prefix = SI_PREFIXES[tier];
+    if frac_part == 0 {
+        format!("{sign}{int_part}{prefix}")
+    } else {
+        while frac_part > 0 && frac_part % 10 == 0 {
+            frac_part /= 10;
+        }
+        format!("{sign}{int_part}{prefix}{frac_part}")
+    }
+}
+
+fn format_property_value(value: &str) -> String {
+    value
+        .parse::<i64>()
+        .map(format_si_number)
+        .unwrap_or_else(|_| value.to_string())
+}
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -53,7 +112,21 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     lines.push(Line::default());
-    lines.push(Line::from(Span::raw(format!("FEN: {}", app.position.fen))));
+
+    let inner_width = area.width.saturating_sub(2) as usize;
+    for row in wrap_line(&format!("FEN: {}", app.position.fen), inner_width.max(1)) {
+        lines.push(Line::from(Span::raw(row)));
+    }
+
+    if !app.engine_info.is_empty() {
+        lines.push(Line::default());
+        for (key, value) in &app.engine_info {
+            let display = format_property_value(value);
+            for row in wrap_line(&format!("{key}: {display}"), inner_width.max(1)) {
+                lines.push(Line::from(Span::raw(row)));
+            }
+        }
+    }
 
     let block = Block::default()
         .title(" Position ")
@@ -108,4 +181,31 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default().borders(Borders::ALL);
     let paragraph = Paragraph::new(vec![status, input_line]).block(block);
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_si_number_examples() {
+        assert_eq!(format_si_number(999), "999");
+        assert_eq!(format_si_number(19184), "19k2");
+        assert_eq!(format_si_number(2321102), "2M32");
+        assert_eq!(format_si_number(123_456_789_012), "123G");
+    }
+
+    #[test]
+    fn format_si_number_small_and_signed() {
+        assert_eq!(format_si_number(0), "0");
+        assert_eq!(format_si_number(500), "500");
+        assert_eq!(format_si_number(-19184), "-19k2");
+    }
+
+    #[test]
+    fn format_property_value_non_numeric_unchanged() {
+        assert_eq!(format_property_value("cp 25"), "cp 25");
+        assert_eq!(format_property_value("e2e4"), "e2e4");
+        assert_eq!(format_property_value("1000"), "1k");
+    }
 }
