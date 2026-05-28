@@ -9,6 +9,8 @@ const MAX_ENGINE_LINES: usize = 5_000;
 
 pub struct App {
     pub position: Position,
+    /// Chronological positions; the last entry is always the current position.
+    position_history: Vec<Position>,
     pub engine_lines: Vec<String>,
     pub engine_info: BTreeMap<String, String>,
     pub input: String,
@@ -21,8 +23,10 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        let position = Position::default();
         Self {
-            position: Position::default(),
+            position: position.clone(),
+            position_history: vec![position],
             engine_lines: Vec::new(),
             engine_info: BTreeMap::new(),
             input: String::new(),
@@ -37,7 +41,8 @@ impl App {
         engine.set_position_fen(&self.position.fen);
         self.engine = Some(engine);
         self.status =
-            "Ready. Enter FEN, UCI move, or: fen/move/go/stop/quit (empty = best move)".into();
+            "Ready. Enter FEN, UCI move, or: fen/move/back/-/go/stop/quit (empty = best move)"
+                .into();
     }
 
     pub fn engine_ready(&self) -> bool {
@@ -112,6 +117,20 @@ impl App {
             return self.apply_new_position(position, &format!(" (move {uci_move})"));
         }
 
+        if line.eq_ignore_ascii_case("back") || line.to_ascii_lowercase().starts_with("back ") {
+            let steps = if line.eq_ignore_ascii_case("back") {
+                1
+            } else {
+                let arg = line[5..].trim();
+                arg.parse::<usize>()
+                    .map_err(|_| anyhow!("back requires a positive step count (e.g. back 2)"))?
+            };
+            if steps == 0 {
+                return Err(anyhow!("back requires a positive step count"));
+            }
+            return self.go_back(steps);
+        }
+
         let Some(engine) = self.engine.as_ref() else {
             return Err(anyhow!("Engine is still starting"));
         };
@@ -142,7 +161,7 @@ impl App {
         }
 
         Err(anyhow!(
-            "Unknown command. Use FEN, UCI move, fen/move/go/stop/quit (empty = best move)"
+            "Unknown command. Use FEN, UCI move, fen/move/back/-/go/stop/quit (empty = best move)"
         ))
     }
 
@@ -157,9 +176,19 @@ impl App {
 
     /// Stop search, discard prior engine info, set position, and start analysis.
     fn apply_new_position(&mut self, position: Position, label: &str) -> Result<()> {
+        append_position_history(&mut self.position_history, position.clone());
+        self.set_position_on_engine(position, label)
+    }
+
+    fn go_back(&mut self, steps: usize) -> Result<()> {
         if self.engine.is_none() {
             return Err(anyhow!("Engine is still starting"));
         }
+        let (position, steps) = rewind_position_history(&mut self.position_history, steps)?;
+        self.set_position_on_engine(position, &format!(" (back {steps})"))
+    }
+
+    fn set_position_on_engine(&mut self, position: Position, label: &str) -> Result<()> {
         let fen = position.fen.clone();
         self.engine.as_ref().unwrap().stop();
         self.clear_engine_properties();
@@ -172,10 +201,31 @@ impl App {
     }
 }
 
+fn append_position_history(history: &mut Vec<Position>, position: Position) {
+    history.push(position);
+}
+
+fn rewind_position_history(history: &mut Vec<Position>, steps: usize) -> Result<(Position, usize)> {
+    let len = history.len();
+    if len <= 1 {
+        return Err(anyhow!("already at the earliest position"));
+    }
+    let steps = steps.min(len - 1);
+    history.truncate(len - steps);
+    let position = history
+        .last()
+        .expect("history non-empty after truncate")
+        .clone();
+    Ok((position, steps))
+}
+
 /// Expand shorthand input: empty → `move`, UCI-like → `move …`, FEN-like → `fen …`.
 fn expand_input_shorthand(line: &str) -> String {
     if line.is_empty() {
         return "move".into();
+    }
+    if line == "-" {
+        return "back".into();
     }
     if is_explicit_command(line) {
         return line.into();
@@ -200,6 +250,8 @@ fn is_explicit_command(line: &str) -> bool {
         || lower.starts_with("move ")
         || lower == "fen"
         || lower.starts_with("fen ")
+        || lower == "back"
+        || lower.starts_with("back ")
 }
 
 /// UCI coordinate move: `e2e4`, `e7e8q`, etc.
@@ -345,8 +397,10 @@ mod tests {
             expand_input_shorthand("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"),
             "fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
         );
+        assert_eq!(expand_input_shorthand("-"), "back");
         assert_eq!(expand_input_shorthand("go depth 10"), "go depth 10");
         assert_eq!(expand_input_shorthand("move d2d4"), "move d2d4");
+        assert_eq!(expand_input_shorthand("back 2"), "back 2");
         assert_eq!(
             expand_input_shorthand("fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w"),
             "fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w"
@@ -489,6 +543,48 @@ mod tests {
             &mut pv_first_move,
         );
         assert_eq!(info.get("bestmovetime"), Some(&"300".into()));
+    }
+
+    #[test]
+    fn position_history_and_back() {
+        let mut history = vec![Position::default()];
+        assert_eq!(history.len(), 1);
+
+        let after_e4 = history[0].apply_uci_move("e2e4").unwrap();
+        append_position_history(&mut history, after_e4);
+        assert_eq!(history.len(), 2);
+
+        let after_e5 = history.last().unwrap().apply_uci_move("e7e5").unwrap();
+        append_position_history(&mut history, after_e5);
+        assert_eq!(history.len(), 3);
+        assert!(history.last().unwrap().fen.contains("4P3/8"));
+
+        let (pos, _) = rewind_position_history(&mut history, 1).unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(pos.fen.contains("4P3/8"));
+        assert!(!pos.fen.contains("4P3/4p3"));
+
+        let (pos, _) = rewind_position_history(&mut history, 1).unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(
+            pos.fen
+                .starts_with("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")
+        );
+
+        let after_d4 = pos.apply_uci_move("d2d4").unwrap();
+        append_position_history(&mut history, after_d4.clone());
+        assert_eq!(history.len(), 2);
+        assert_eq!(history.last().unwrap().fen, after_d4.fen);
+    }
+
+    #[test]
+    fn rewind_position_history_caps_steps() {
+        let mut history = vec![Position::default()];
+        let after_e4 = history[0].apply_uci_move("e2e4").unwrap();
+        append_position_history(&mut history, after_e4);
+        let (_, steps) = rewind_position_history(&mut history, 99).unwrap();
+        assert_eq!(steps, 1);
+        assert_eq!(history.len(), 1);
     }
 
     #[test]
