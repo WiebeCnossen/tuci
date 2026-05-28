@@ -4,6 +4,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use std::collections::BTreeMap;
+
 use crate::app::{App, wrap_line};
 use crate::fen::{PieceColor, piece_glyph};
 
@@ -66,6 +68,19 @@ fn format_property_value(value: &str) -> String {
         .unwrap_or_else(|_| value.to_string())
 }
 
+/// Display order: alphabetical keys except `pv`, then `pv` last.
+fn engine_info_display_keys(info: &BTreeMap<String, String>) -> Vec<(&str, &str)> {
+    let mut pairs: Vec<_> = info
+        .iter()
+        .filter(|(k, _)| k.as_str() != "pv")
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    if let Some(pv) = info.get("pv") {
+        pairs.push(("pv", pv.as_str()));
+    }
+    pairs
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let chunks = Layout::default()
@@ -120,7 +135,7 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &App) {
 
     if !app.engine_info.is_empty() {
         lines.push(Line::default());
-        for (key, value) in &app.engine_info {
+        for (key, value) in engine_info_display_keys(&app.engine_info) {
             let display = format_property_value(value);
             for row in wrap_line(&format!("{key}: {display}"), inner_width.max(1)) {
                 lines.push(Line::from(Span::raw(row)));
@@ -207,5 +222,20 @@ mod tests {
         assert_eq!(format_property_value("cp 25"), "cp 25");
         assert_eq!(format_property_value("e2e4"), "e2e4");
         assert_eq!(format_property_value("1000"), "1k");
+    }
+
+    #[test]
+    fn engine_info_display_keys_pv_last() {
+        let mut info = BTreeMap::new();
+        info.insert("depth".into(), "10".into());
+        info.insert("pv".into(), "e2e4 e7e5".into());
+        info.insert("nodes".into(), "1000".into());
+        info.insert("score".into(), "cp 25".into());
+
+        let keys: Vec<_> = engine_info_display_keys(&info)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(keys, ["depth", "nodes", "score", "pv"]);
     }
 }
