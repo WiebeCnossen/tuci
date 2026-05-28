@@ -86,6 +86,17 @@ impl App {
             return Ok(());
         }
 
+        if line.to_ascii_lowercase().starts_with("fen ") {
+            let fen = line[4..].trim();
+            let position = Position::from_fen(fen)?;
+            return self.apply_new_position(position, "");
+        }
+
+        if !line.contains(' ') && line.contains('/') {
+            let position = Position::from_fen(line)?;
+            return self.apply_new_position(position, " (bare FEN)");
+        }
+
         let Some(engine) = self.engine.as_ref() else {
             return Err(anyhow!("Engine is still starting"));
         };
@@ -115,25 +126,6 @@ impl App {
             return Ok(());
         }
 
-        if line.to_ascii_lowercase().starts_with("fen ") {
-            let fen = line[4..].trim();
-            let position = Position::from_fen(fen)?;
-            engine.set_position_fen(&position.fen);
-            self.pv_first_move = None;
-            self.position = position;
-            self.status = "Position updated".into();
-            return Ok(());
-        }
-
-        if !line.contains(' ') && line.contains('/') {
-            let position = Position::from_fen(line)?;
-            engine.set_position_fen(&position.fen);
-            self.pv_first_move = None;
-            self.position = position;
-            self.status = "Position updated (bare FEN)".into();
-            return Ok(());
-        }
-
         Err(anyhow!(
             "Unknown command. Use: fen <FEN>, go [args], stop, quit"
         ))
@@ -141,6 +133,27 @@ impl App {
 
     pub fn engine(&self) -> Option<&UciEngine> {
         self.engine.as_ref()
+    }
+
+    fn clear_engine_properties(&mut self) {
+        self.engine_info.clear();
+        self.pv_first_move = None;
+    }
+
+    /// Stop search, discard prior engine info, set position, and start analysis.
+    fn apply_new_position(&mut self, position: Position, label: &str) -> Result<()> {
+        if self.engine.is_none() {
+            return Err(anyhow!("Engine is still starting"));
+        }
+        let fen = position.fen.clone();
+        self.engine.as_ref().unwrap().stop();
+        self.clear_engine_properties();
+        let engine = self.engine.as_ref().unwrap();
+        engine.set_position_fen(&fen);
+        engine.go("");
+        self.position = position;
+        self.status = format!("Position updated{label}; sent stop, position, go infinite");
+        Ok(())
     }
 }
 
@@ -255,6 +268,16 @@ fn parse_score_tokens(tokens: &[&str], i: &mut usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clear_engine_properties_resets_info_and_pv() {
+        let mut app = App::new();
+        app.engine_info.insert("depth".into(), "10".into());
+        app.pv_first_move = Some("e2e4".into());
+        app.clear_engine_properties();
+        assert!(app.engine_info.is_empty());
+        assert!(app.pv_first_move.is_none());
+    }
 
     #[test]
     fn wrap_line_splits_long_text() {

@@ -2,6 +2,20 @@ use anyhow::{Result, bail};
 
 const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
+/// Defaults for FEN fields 2–6 when omitted (active color, castling, en passant, halfmove, fullmove).
+const FEN_FIELD_DEFAULTS: [&str; 5] = ["w", "-", "-", "0", "1"];
+
+/// Pad a partial FEN (1–5 fields) with standard defaults for missing trailing fields.
+fn pad_fen(fen: &str) -> String {
+    let parts: Vec<&str> = fen.split_whitespace().collect();
+    if parts.is_empty() || parts.len() >= 6 {
+        return fen.trim().to_string();
+    }
+    let mut fields = parts;
+    fields.extend_from_slice(&FEN_FIELD_DEFAULTS[fields.len() - 1..]);
+    fields.join(" ")
+}
+
 #[derive(Clone, Debug)]
 pub struct Position {
     pub fen: String,
@@ -16,7 +30,8 @@ impl Default for Position {
 
 impl Position {
     pub fn from_fen(fen: &str) -> Result<Self> {
-        let board_part = fen.split_whitespace().next().unwrap_or(fen);
+        let fen = pad_fen(fen);
+        let board_part = fen.split_whitespace().next().unwrap_or(fen.as_str());
         let mut board = [[' '; 8]; 8];
 
         let mut rank = 0usize;
@@ -48,10 +63,7 @@ impl Position {
             bail!("FEN must have 8 ranks, found {rank}");
         }
 
-        Ok(Self {
-            fen: fen.to_string(),
-            board,
-        })
+        Ok(Self { fen, board })
     }
 
     pub fn board(&self) -> &[[char; 8]; 8] {
@@ -81,5 +93,37 @@ pub fn piece_glyph(piece: char) -> Option<(&'static str, PieceColor)> {
         'p' => Some(("♙", PieceColor::Black)),
         ' ' => None,
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOARD: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
+
+    #[test]
+    fn pad_fen_board_only() {
+        assert_eq!(pad_fen(BOARD), format!("{BOARD} w - - 0 1"));
+    }
+
+    #[test]
+    fn pad_fen_partial_fields() {
+        assert_eq!(
+            pad_fen(&format!("{BOARD} b KQ")),
+            format!("{BOARD} b KQ - 0 1")
+        );
+    }
+
+    #[test]
+    fn pad_fen_full_unchanged() {
+        let full = START_FEN;
+        assert_eq!(pad_fen(full), full);
+    }
+
+    #[test]
+    fn from_fen_pads_before_parse() {
+        let pos = Position::from_fen(BOARD).unwrap();
+        assert_eq!(pos.fen, format!("{BOARD} w - - 0 1"));
     }
 }

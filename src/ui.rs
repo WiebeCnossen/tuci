@@ -52,7 +52,7 @@ fn format_si_number(n: i64) -> String {
     if frac_part == 0 {
         format!("{sign}{int_part}{prefix}")
     } else {
-        while frac_part > 0 && frac_part % 10 == 0 {
+        while frac_part > 0 && frac_part.is_multiple_of(10) {
             frac_part /= 10;
         }
         format!("{sign}{int_part}{prefix}{frac_part}")
