@@ -10,6 +10,8 @@ use crate::app::{App, wrap_line};
 use crate::fen::{PieceColor, piece_glyph};
 
 const SI_PREFIXES: [&str; 8] = ["", "k", "M", "G", "T", "P", "E", "Z"];
+const ENGINE_INNER_LINES: u16 = 5;
+const ENGINE_TILE_HEIGHT: u16 = ENGINE_INNER_LINES + 2;
 
 /// Format an integer with at most 3 significant digits and SI suffixes (k, M, G, …).
 fn format_si_number(n: i64) -> String {
@@ -83,23 +85,30 @@ fn engine_info_display_keys(info: &BTreeMap<String, String>) -> Vec<(&str, &str)
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    let (position_width, position_height) = position_tile_size(app);
+
+    let mut vertical_constraints = vec![Constraint::Length(position_height), Constraint::Min(1)];
+    if app.engine_tile_visible {
+        vertical_constraints.push(Constraint::Length(ENGINE_TILE_HEIGHT));
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(4)])
+        .constraints(vertical_constraints)
         .split(area);
 
-    if app.engine_tile_visible {
-        let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .split(chunks[0]);
+    let top_row = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(position_width), Constraint::Min(1)])
+        .split(chunks[0]);
 
-        draw_board(frame, main_chunks[0], app);
-        draw_engine_output(frame, main_chunks[1], app);
-    } else {
-        draw_board(frame, chunks[0], app);
+    draw_position(frame, top_row[0], app);
+    draw_command(frame, top_row[1], app);
+    draw_properties(frame, chunks[1], app);
+
+    if app.engine_tile_visible {
+        draw_engine_output(frame, chunks[2], app);
     }
-    draw_input(frame, chunks[1], app);
 }
 
 fn piece_style(color: PieceColor) -> Style {
@@ -109,7 +118,7 @@ fn piece_style(color: PieceColor) -> Style {
     }
 }
 
-fn draw_board(frame: &mut Frame, area: Rect, app: &App) {
+fn position_board_lines(app: &App) -> Vec<Line<'_>> {
     let mut lines = vec![Line::from(Span::raw("  a b c d e f g h"))];
 
     for (row_idx, row) in app.position.board().iter().enumerate() {
@@ -130,22 +139,24 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(spans));
     }
 
-    lines.push(Line::default());
+    lines
+}
 
-    let inner_width = area.width.saturating_sub(2) as usize;
-    for row in wrap_line(&format!("FEN: {}", app.position.fen), inner_width.max(1)) {
-        lines.push(Line::from(Span::raw(row)));
-    }
+/// Terminal size (columns × rows) for the Position tile including its border.
+fn position_tile_size(app: &App) -> (u16, u16) {
+    let lines = position_board_lines(app);
+    let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    let width = u16::try_from(content_width)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2);
+    (width, height)
+}
 
-    if !app.engine_info.is_empty() {
-        lines.push(Line::default());
-        for (key, value) in engine_info_display_keys(&app.engine_info) {
-            let display = format_property_value(value);
-            for row in wrap_line(&format!("{key}: {display}"), inner_width.max(1)) {
-                lines.push(Line::from(Span::raw(row)));
-            }
-        }
-    }
+fn draw_position(frame: &mut Frame, area: Rect, app: &App) {
+    let lines = position_board_lines(app);
 
     let block = Block::default()
         .title(" Position ")
@@ -156,8 +167,35 @@ fn draw_board(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
+fn draw_properties(frame: &mut Frame, area: Rect, app: &App) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let mut lines = Vec::new();
+
+    if app.engine_info.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no engine properties yet)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for (key, value) in engine_info_display_keys(&app.engine_info) {
+            let display = format_property_value(value);
+            for row in wrap_line(&format!("{key}: {display}"), inner_width.max(1)) {
+                lines.push(Line::from(Span::raw(row)));
+            }
+        }
+    }
+
+    let block = Block::default()
+        .title(" Properties ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
 fn draw_engine_output(frame: &mut Frame, area: Rect, app: &App) {
-    let inner_height = area.height.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2).min(ENGINE_INNER_LINES) as usize;
     let inner_width = area.width.saturating_sub(2) as usize;
     let visible = app.visible_engine_display_lines(inner_height, inner_width);
 
@@ -175,8 +213,9 @@ fn draw_engine_output(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
-    let status = Line::from(vec![
+fn draw_command(frame: &mut Frame, area: Rect, app: &App) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let mut lines = vec![Line::from(vec![
         Span::styled(
             "Status: ",
             Style::default()
@@ -184,9 +223,15 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(app.status.clone()),
-    ]);
+    ])];
 
-    let input_line = Line::from(vec![
+    lines.push(Line::default());
+    for row in wrap_line(&format!("FEN: {}", app.position.fen), inner_width.max(1)) {
+        lines.push(Line::from(Span::raw(row)));
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
         Span::styled("> ", Style::default().fg(Color::Yellow)),
         Span::raw(app.input.clone()),
         Span::styled(
@@ -195,10 +240,14 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::SLOW_BLINK),
         ),
-    ]);
+    ]));
 
-    let block = Block::default().borders(Borders::ALL);
-    let paragraph = Paragraph::new(vec![status, input_line]).block(block);
+    let block = Block::default()
+        .title(" Command ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
 }
 
@@ -226,6 +275,12 @@ mod tests {
         assert_eq!(format_property_value("cp 25"), "cp 25");
         assert_eq!(format_property_value("e2e4"), "e2e4");
         assert_eq!(format_property_value("1000"), "1k");
+    }
+
+    #[test]
+    fn position_tile_size_matches_board() {
+        let app = crate::app::App::new();
+        assert_eq!(position_tile_size(&app), (21, 11));
     }
 
     #[test]
