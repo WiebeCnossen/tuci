@@ -88,13 +88,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
         .constraints([Constraint::Min(3), Constraint::Length(4)])
         .split(area);
 
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(chunks[0]);
+    if app.engine_tile_visible {
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(chunks[0]);
 
-    draw_board(frame, main_chunks[0], app);
-    draw_engine_output(frame, main_chunks[1], app);
+        draw_board(frame, main_chunks[0], app);
+        draw_engine_output(frame, main_chunks[1], app);
+    } else {
+        draw_board(frame, chunks[0], app);
+    }
     draw_input(frame, chunks[1], app);
 }
 

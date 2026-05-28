@@ -16,6 +16,7 @@ pub struct App {
     pub input: String,
     pub status: String,
     pub should_quit: bool,
+    pub engine_tile_visible: bool,
     engine: Option<UciEngine>,
     /// First move of the current principal variation (for `bestmovetime`).
     pv_first_move: Option<String>,
@@ -32,6 +33,7 @@ impl App {
             input: String::new(),
             status: "Starting engine…".into(),
             should_quit: false,
+            engine_tile_visible: false,
             engine: None,
             pv_first_move: None,
         }
@@ -131,6 +133,28 @@ impl App {
             return self.go_back(steps);
         }
 
+        if line.eq_ignore_ascii_case("engine show") {
+            self.engine_tile_visible = true;
+            self.status = "Engine output shown".into();
+            return Ok(());
+        }
+
+        if line.eq_ignore_ascii_case("engine hide") {
+            self.engine_tile_visible = false;
+            self.status = "Engine output hidden".into();
+            return Ok(());
+        }
+
+        if line.eq_ignore_ascii_case("engine") {
+            self.engine_tile_visible = !self.engine_tile_visible;
+            self.status = if self.engine_tile_visible {
+                "Engine output shown".into()
+            } else {
+                "Engine output hidden".into()
+            };
+            return Ok(());
+        }
+
         let Some(engine) = self.engine.as_ref() else {
             return Err(anyhow!("Engine is still starting"));
         };
@@ -161,7 +185,7 @@ impl App {
         }
 
         Err(anyhow!(
-            "Unknown command. Use FEN, UCI move, fen/move/back/-/go/stop/quit (empty = best move)"
+            "Unknown command. Use FEN, UCI move, fen/move/back/-/engine/go/stop/quit (empty = best move)"
         ))
     }
 
@@ -252,6 +276,9 @@ fn is_explicit_command(line: &str) -> bool {
         || lower.starts_with("fen ")
         || lower == "back"
         || lower.starts_with("back ")
+        || lower == "engine"
+        || lower == "engine show"
+        || lower == "engine hide"
 }
 
 /// UCI coordinate move: `e2e4`, `e7e8q`, etc.
