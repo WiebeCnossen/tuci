@@ -174,24 +174,24 @@ impl App {
             return self.go_back(steps);
         }
 
-        if line.eq_ignore_ascii_case("engine show") {
+        if line.eq_ignore_ascii_case("console show") {
             self.engine_tile_visible = true;
-            self.status = "Engine output shown".into();
+            self.status = "Console shown".into();
             return Ok(());
         }
 
-        if line.eq_ignore_ascii_case("engine hide") {
+        if line.eq_ignore_ascii_case("console hide") {
             self.engine_tile_visible = false;
-            self.status = "Engine output hidden".into();
+            self.status = "Console hidden".into();
             return Ok(());
         }
 
-        if line.eq_ignore_ascii_case("engine") {
+        if line.eq_ignore_ascii_case("console") {
             self.engine_tile_visible = !self.engine_tile_visible;
             self.status = if self.engine_tile_visible {
-                "Engine output shown".into()
+                "Console shown".into()
             } else {
-                "Engine output hidden".into()
+                "Console hidden".into()
             };
             return Ok(());
         }
@@ -234,7 +234,7 @@ impl App {
         }
 
         Err(anyhow!(
-            "Unknown command. Use FEN, UCI move, fen/move/back/-/engine/go/stop/quit (empty = best move)"
+            "Unknown command. Use FEN, UCI move, fen/move/back/-/console/go/stop/quit (empty = best move)"
         ))
     }
 
@@ -349,9 +349,9 @@ fn is_explicit_command(line: &str) -> bool {
         || lower.starts_with("fen ")
         || lower == "back"
         || lower.starts_with("back ")
-        || lower == "engine"
-        || lower == "engine show"
-        || lower == "engine hide"
+        || lower == "console"
+        || lower == "console show"
+        || lower == "console hide"
 }
 
 /// UCI coordinate move: `e2e4`, `e7e8q`, etc.

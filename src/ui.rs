@@ -10,7 +10,7 @@ use crate::app::{App, wrap_line};
 use crate::fen::{PieceColor, piece_glyph};
 
 const SI_PREFIXES: [&str; 8] = ["", "k", "M", "G", "T", "P", "E", "Z"];
-const ENGINE_INNER_LINES: u16 = 5;
+const ENGINE_INNER_LINES: u16 = 8;
 const ENGINE_TILE_HEIGHT: u16 = ENGINE_INNER_LINES + 2;
 
 /// Format an integer with at most 3 significant digits and SI suffixes (k, M, G, …).
@@ -216,6 +216,18 @@ fn draw_properties(frame: &mut Frame, area: Rect, engine: &crate::app::EngineSta
             for row in wrap_line(&format!("{key}: {display}"), inner_width.max(1)) {
                 lines.push(Line::from(Span::raw(row)));
             }
+        }
+    }
+
+    if let Some(last) = engine.lines.last() {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        for row in wrap_line(last, inner_width.max(1)) {
+            lines.push(Line::from(Span::styled(
+                row,
+                Style::default().fg(Color::DarkGray),
+            )));
         }
     }
 
