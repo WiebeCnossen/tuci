@@ -164,10 +164,7 @@ fn position_board_lines(app: &App) -> Vec<Line<'_>> {
                         spans.push(Span::styled(glyph, piece_style(color)));
                     }
                     None if is_light_square(rank, file) => spans.push(Span::raw("·")),
-                    None => spans.push(Span::styled(
-                        "▪",
-                        Style::default().fg(Color::DarkGray),
-                    )),
+                    None => spans.push(Span::styled("▪", Style::default().fg(Color::DarkGray))),
                 }
             }
             Line::from(spans)

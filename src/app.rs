@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 
@@ -77,6 +78,8 @@ pub struct App {
     pub status: String,
     pub should_quit: bool,
     pub engine_tile_visible: bool,
+    /// Set by `load <file>`; the main loop loads this config and respawns engines.
+    pub pending_load: Option<PathBuf>,
 }
 
 impl App {
@@ -90,7 +93,15 @@ impl App {
             status: "Starting engines…".into(),
             should_quit: false,
             engine_tile_visible: false,
+            pending_load: None,
         }
+    }
+
+    /// Quit running engines and replace engine slots; position and history are unchanged.
+    pub fn begin_reload(&mut self, engine_names: Vec<String>) {
+        self.quit_all_engines();
+        self.engines = engine_names.into_iter().map(EngineState::new).collect();
+        self.status = "Starting engines…".into();
     }
 
     pub fn attach_engine(&mut self, index: usize, engine: UciEngine) {
@@ -196,6 +207,17 @@ impl App {
             return Ok(());
         }
 
+        if line.to_ascii_lowercase().starts_with("load ") {
+            let filename = line[5..].trim();
+            if filename.is_empty() {
+                return Err(anyhow!("load requires a config file name"));
+            }
+            let path = resolve_load_path(filename);
+            self.pending_load = Some(path.clone());
+            self.status = format!("Loading {}…", path.display());
+            return Ok(());
+        }
+
         if !self.engines_ready() {
             return Err(anyhow!("Engines are still starting"));
         }
@@ -234,7 +256,7 @@ impl App {
         }
 
         Err(anyhow!(
-            "Unknown command. Use FEN, UCI move, fen/move/back/-/console/go/stop/quit (empty = best move)"
+            "Unknown command. Use FEN, UCI move, fen/move/back/-/console/load/go/stop/quit (empty = best move)"
         ))
     }
 
@@ -251,7 +273,7 @@ impl App {
         let total = self.engines.len();
         if ready == total {
             self.status =
-                "Ready. Enter FEN, UCI move, or: fen/move/back/-/go/stop/quit (empty = best move)"
+                "Ready. Enter FEN, UCI move, or: fen/move/back/-/load/go/stop/quit (empty = best move)"
                     .into();
         } else {
             self.status = format!("Starting engines… ({ready}/{total} ready)");
@@ -352,6 +374,17 @@ fn is_explicit_command(line: &str) -> bool {
         || lower == "console"
         || lower == "console show"
         || lower == "console hide"
+        || lower.starts_with("load ")
+}
+
+/// If `filename` has no extension, append `.toml`.
+pub fn resolve_load_path(filename: &str) -> PathBuf {
+    let path = PathBuf::from(filename);
+    match path.extension() {
+        None => path.with_extension("toml"),
+        Some(ext) if ext.is_empty() => path.with_extension("toml"),
+        Some(_) => path,
+    }
 }
 
 /// UCI coordinate move: `e2e4`, `e7e8q`, etc.
@@ -692,6 +725,20 @@ mod tests {
         let (_, steps) = rewind_position_history(&mut history, 99).unwrap();
         assert_eq!(steps, 1);
         assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn resolve_load_path_adds_toml_extension() {
+        assert_eq!(resolve_load_path("stockfish"), Path::new("stockfish.toml"));
+        assert_eq!(
+            resolve_load_path("configs/analysis"),
+            Path::new("configs/analysis.toml")
+        );
+        assert_eq!(
+            resolve_load_path("stockfish.toml"),
+            Path::new("stockfish.toml")
+        );
+        assert_eq!(resolve_load_path("engine.cfg"), Path::new("engine.cfg"));
     }
 
     #[test]
