@@ -144,11 +144,16 @@ fn piece_style(color: PieceColor) -> Style {
     }
 }
 
+fn is_light_square(rank: usize, file: usize) -> bool {
+    (file + (7 - rank)) % 2 == 1
+}
+
 fn position_board_lines(app: &App) -> Vec<Line<'_>> {
     app.position
         .board()
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(rank, row)| {
             let mut spans = Vec::with_capacity(row.len() * 2);
             for (file, &piece) in row.iter().enumerate() {
                 if file > 0 {
@@ -158,7 +163,11 @@ fn position_board_lines(app: &App) -> Vec<Line<'_>> {
                     Some((glyph, color)) => {
                         spans.push(Span::styled(glyph, piece_style(color)));
                     }
-                    None => spans.push(Span::raw("·")),
+                    None if is_light_square(rank, file) => spans.push(Span::raw("·")),
+                    None => spans.push(Span::styled(
+                        "▪",
+                        Style::default().fg(Color::DarkGray),
+                    )),
                 }
             }
             Line::from(spans)
@@ -300,6 +309,12 @@ mod tests {
         assert_eq!(format_property_value("cp 25"), "cp 25");
         assert_eq!(format_property_value("e2e4"), "e2e4");
         assert_eq!(format_property_value("1000"), "1k");
+    }
+
+    #[test]
+    fn is_light_square_a1_is_dark() {
+        assert!(!is_light_square(7, 0));
+        assert!(is_light_square(7, 1));
     }
 
     #[test]
