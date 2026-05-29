@@ -145,27 +145,25 @@ fn piece_style(color: PieceColor) -> Style {
 }
 
 fn position_board_lines(app: &App) -> Vec<Line<'_>> {
-    let mut lines = vec![Line::from(Span::raw("  a b c d e f g h"))];
-
-    for (row_idx, row) in app.position.board().iter().enumerate() {
-        let rank = 8 - row_idx;
-        let mut spans = vec![Span::raw(format!("{rank} "))];
-        for (file, &piece) in row.iter().enumerate() {
-            if file > 0 {
-                spans.push(Span::raw(" "));
-            }
-            match piece_glyph(piece) {
-                Some((glyph, color)) => {
-                    spans.push(Span::styled(glyph, piece_style(color)));
+    app.position
+        .board()
+        .iter()
+        .map(|row| {
+            let mut spans = Vec::with_capacity(row.len() * 2);
+            for (file, &piece) in row.iter().enumerate() {
+                if file > 0 {
+                    spans.push(Span::raw(" "));
                 }
-                None => spans.push(Span::raw("·")),
+                match piece_glyph(piece) {
+                    Some((glyph, color)) => {
+                        spans.push(Span::styled(glyph, piece_style(color)));
+                    }
+                    None => spans.push(Span::raw("·")),
+                }
             }
-        }
-        spans.push(Span::raw(format!(" {rank}")));
-        lines.push(Line::from(spans));
-    }
-
-    lines
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// Terminal size (columns × rows) for the Position tile including its border.
@@ -178,7 +176,8 @@ fn position_tile_size(app: &App) -> (u16, u16) {
     let height = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
         .saturating_add(2);
-    (width, height)
+    // Add 1 column spacing to the right
+    (width + 1, height)
 }
 
 fn draw_position(frame: &mut Frame, area: Rect, app: &App) {
@@ -306,7 +305,7 @@ mod tests {
     #[test]
     fn position_tile_size_matches_board() {
         let app = crate::app::App::new(vec!["Engine".into()]);
-        assert_eq!(position_tile_size(&app), (21, 11));
+        assert_eq!(position_tile_size(&app), (18, 10));
     }
 
     #[test]
