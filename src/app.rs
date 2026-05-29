@@ -256,7 +256,7 @@ impl App {
         }
 
         Err(anyhow!(
-            "Unknown command. Use FEN, UCI move, fen/move/back/-/console/load/go/stop/quit (empty = best move)"
+            "Unknown command. Use FEN, UCI move, config name, fen/move/back/-/console/load/go/stop/quit (empty = best move)"
         ))
     }
 
@@ -273,7 +273,7 @@ impl App {
         let total = self.engines.len();
         if ready == total {
             self.status =
-                "Ready. Enter FEN, UCI move, or: fen/move/back/-/load/go/stop/quit (empty = best move)"
+                "Ready. Enter FEN, UCI move, config name, or: fen/move/back/-/load/go/stop/quit (empty = best move)"
                     .into();
         } else {
             self.status = format!("Starting engines… ({ready}/{total} ready)");
@@ -338,7 +338,7 @@ fn rewind_position_history(history: &mut Vec<Position>, steps: usize) -> Result<
     Ok((position, steps))
 }
 
-/// Expand shorthand input: empty → `move`, UCI-like → `move …`, FEN-like → `fen …`.
+/// Expand shorthand input: empty → `move`, UCI-like → `move …`, FEN-like → `fen …`, existing config → `load …`.
 fn expand_input_shorthand(line: &str) -> String {
     if line.is_empty() {
         return "move".into();
@@ -354,6 +354,9 @@ fn expand_input_shorthand(line: &str) -> String {
     }
     if looks_like_fen(line) {
         return format!("fen {line}");
+    }
+    if looks_like_loadable_config(line) {
+        return format!("load {line}");
     }
     line.into()
 }
@@ -374,7 +377,13 @@ fn is_explicit_command(line: &str) -> bool {
         || lower == "console"
         || lower == "console show"
         || lower == "console hide"
+        || lower == "load"
         || lower.starts_with("load ")
+}
+
+/// True when `resolve_load_path(line)` points at an existing config file.
+fn looks_like_loadable_config(line: &str) -> bool {
+    resolve_load_path(line).is_file()
 }
 
 /// If `filename` has no extension, append `.toml`.
@@ -519,6 +528,8 @@ fn parse_score_tokens(tokens: &[&str], i: &mut usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn test_app() -> App {
@@ -542,6 +553,23 @@ mod tests {
             expand_input_shorthand("fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w"),
             "fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w"
         );
+        if resolve_load_path("stockfish").is_file() {
+            assert_eq!(expand_input_shorthand("stockfish"), "load stockfish");
+            assert_eq!(expand_input_shorthand("stockfish.toml"), "load stockfish.toml");
+        }
+        assert_eq!(
+            expand_input_shorthand("definitely_not_a_tuci_config_42"),
+            "definitely_not_a_tuci_config_42"
+        );
+    }
+
+    #[test]
+    fn looks_like_loadable_config_checks_resolved_path() {
+        assert_eq!(
+            looks_like_loadable_config("stockfish"),
+            Path::new("stockfish.toml").is_file()
+        );
+        assert!(!looks_like_loadable_config("definitely_not_a_tuci_config_42"));
     }
 
     #[test]
