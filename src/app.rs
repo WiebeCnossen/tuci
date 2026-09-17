@@ -475,6 +475,12 @@ fn parse_info_line(
             }
             continue;
         }
+        if key == "wdl" {
+            if let Some(value) = parse_wdl_tokens(&tokens, &mut i) {
+                info.insert("wdl".into(), value);
+            }
+            continue;
+        }
         i += 1;
         if i < tokens.len() {
             let value = tokens[i].to_string();
@@ -500,6 +506,17 @@ fn parse_info_line(
             info.insert("pv".into(), pv);
         }
     }
+}
+
+/// After `wdl`, parse three values joined by spaces.
+fn parse_wdl_tokens(tokens: &[&str], i: &mut usize) -> Option<String> {
+    *i += 1;
+    if *i + 2 >= tokens.len() {
+        return None;
+    }
+    let value = tokens[*i..*i + 3].join(" ");
+    *i += 3;
+    Some(value)
 }
 
 /// After `score`, parse `cp N`, `mate N`, or `cp N upperbound|lowerbound`.
@@ -555,7 +572,10 @@ mod tests {
         );
         if resolve_load_path("stockfish").is_file() {
             assert_eq!(expand_input_shorthand("stockfish"), "load stockfish");
-            assert_eq!(expand_input_shorthand("stockfish.toml"), "load stockfish.toml");
+            assert_eq!(
+                expand_input_shorthand("stockfish.toml"),
+                "load stockfish.toml"
+            );
         }
         assert_eq!(
             expand_input_shorthand("definitely_not_a_tuci_config_42"),
@@ -569,7 +589,9 @@ mod tests {
             looks_like_loadable_config("stockfish"),
             Path::new("stockfish.toml").is_file()
         );
-        assert!(!looks_like_loadable_config("definitely_not_a_tuci_config_42"));
+        assert!(!looks_like_loadable_config(
+            "definitely_not_a_tuci_config_42"
+        ));
     }
 
     #[test]
@@ -671,6 +693,20 @@ mod tests {
             &mut pv_first_move,
         );
         assert_eq!(info.get("score"), Some(&"mate 3".into()));
+    }
+
+    #[test]
+    fn parse_info_line_wdl_joins_three_values() {
+        let mut info = BTreeMap::new();
+        let mut pv_first_move = None;
+        parse_info_line(
+            "info depth 12 score cp 25 wdl 100 200 700 nodes 1000 pv e2e4",
+            &mut info,
+            &mut pv_first_move,
+        );
+        assert_eq!(info.get("wdl"), Some(&"100 200 700".into()));
+        assert_eq!(info.get("nodes"), Some(&"1000".into()));
+        assert_eq!(info.get("score"), Some(&"cp 25".into()));
     }
 
     #[test]
