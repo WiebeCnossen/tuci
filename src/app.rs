@@ -91,13 +91,19 @@ pub struct App {
 
 impl App {
     pub fn new(engine_names: Vec<String>, multipv: u32) -> Self {
-        let position = Position::default();
+        let (position, status) = match crate::session::load_position() {
+            Some(position) => (
+                position,
+                "Restored position from ~/Tuci.toml; starting engines…".into(),
+            ),
+            None => (Position::default(), "Starting engines…".into()),
+        };
         Self {
             position: position.clone(),
             position_history: vec![position],
             engines: engine_names.into_iter().map(EngineState::new).collect(),
             input: String::new(),
-            status: "Starting engines…".into(),
+            status,
             should_quit: false,
             engine_tile_visible: false,
             multipv: multipv.max(1),
@@ -382,6 +388,7 @@ impl App {
             }
         }
         self.position = position;
+        let _ = crate::session::save_position(&self.position);
         self.status = format!("Position updated{label}; sent stop, position, go infinite");
         Ok(())
     }

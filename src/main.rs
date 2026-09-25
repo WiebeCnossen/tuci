@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod fen;
 mod process_priority;
+mod session;
 mod terminal;
 mod uci;
 mod ui;
@@ -95,6 +96,7 @@ async fn main() -> Result<()> {
 
     let result = run_loop(&mut terminal, &mut app, &mut runtime).await;
 
+    let _ = crate::session::save_position(&app.position);
     app.quit_all_engines();
     terminal::restore(terminal).await?;
     result
