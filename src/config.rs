@@ -46,6 +46,22 @@ impl Config {
             })
             .collect()
     }
+
+    /// Highest MultiPV requested in engine options, or 1 when unset/invalid.
+    pub fn multipv(&self) -> u32 {
+        self.engines
+            .iter()
+            .filter_map(|engine| {
+                engine
+                    .options
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("MultiPV"))
+                    .and_then(|(_, v)| v.parse::<u32>().ok())
+            })
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    }
 }
 
 fn deserialize_options<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
@@ -99,5 +115,25 @@ Hash = 512
             config.engine_display_names(),
             vec!["Stockfish".to_string(), "other".to_string()]
         );
+        assert_eq!(config.multipv(), 1);
+    }
+
+    #[test]
+    fn multipv_reads_highest_engine_option() {
+        let text = r#"
+[[engines]]
+path = "/usr/bin/stockfish"
+
+[engines.options]
+MultiPV = 3
+
+[[engines]]
+path = "/usr/bin/other"
+
+[engines.options]
+MultiPV = 5
+"#;
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.multipv(), 5);
     }
 }

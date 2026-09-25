@@ -74,7 +74,7 @@ impl EngineRuntime {
 
     async fn reload(&self, app: &mut App, path: PathBuf) -> Result<()> {
         let config = Config::load(&path).await?;
-        app.begin_reload(config.engine_display_names());
+        app.begin_reload(config.engine_display_names(), config.multipv());
         self.spawn_from_config(&config);
         app.status = format!("Loaded {}; starting engines…", path.display());
         Ok(())
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     runtime.spawn_from_config(&config);
 
     let mut terminal = terminal::setup().await?;
-    let mut app = App::new(engine_names);
+    let mut app = App::new(engine_names, config.multipv());
 
     let result = run_loop(&mut terminal, &mut app, &mut runtime).await;
 

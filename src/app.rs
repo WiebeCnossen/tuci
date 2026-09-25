@@ -11,7 +11,10 @@ const MAX_ENGINE_LINES: usize = 5_000;
 pub struct EngineState {
     pub name: String,
     pub lines: Vec<String>,
+    /// Search-wide stats (nodes, nps, time, bestmove, …).
     pub info: BTreeMap<String, String>,
+    /// Per-PV properties keyed by MultiPV index (1-based).
+    pub pvs: BTreeMap<u32, BTreeMap<String, String>>,
     pv_first_move: Option<String>,
     engine: Option<UciEngine>,
 }
@@ -22,6 +25,7 @@ impl EngineState {
             name,
             lines: Vec::new(),
             info: BTreeMap::new(),
+            pvs: BTreeMap::new(),
             pv_first_move: None,
             engine: None,
         }
@@ -29,6 +33,7 @@ impl EngineState {
 
     fn clear_properties(&mut self) {
         self.info.clear();
+        self.pvs.clear();
         self.pv_first_move = None;
     }
 
@@ -38,7 +43,7 @@ impl EngineState {
         }
         for line in lines {
             if line.starts_with("info ") && !should_skip_info_properties(line) {
-                parse_info_line(line, &mut self.info, &mut self.pv_first_move);
+                parse_info_line(line, &mut self.info, &mut self.pvs, &mut self.pv_first_move);
             }
         }
         self.lines.extend_from_slice(lines);
@@ -78,12 +83,14 @@ pub struct App {
     pub status: String,
     pub should_quit: bool,
     pub engine_tile_visible: bool,
+    /// MultiPV count sent to engines; 1 means off. Default is 1.
+    pub multipv: u32,
     /// Set by `load <file>`; the main loop loads this config and respawns engines.
     pub pending_load: Option<PathBuf>,
 }
 
 impl App {
-    pub fn new(engine_names: Vec<String>) -> Self {
+    pub fn new(engine_names: Vec<String>, multipv: u32) -> Self {
         let position = Position::default();
         Self {
             position: position.clone(),
@@ -93,19 +100,22 @@ impl App {
             status: "Starting engines…".into(),
             should_quit: false,
             engine_tile_visible: false,
+            multipv: multipv.max(1),
             pending_load: None,
         }
     }
 
     /// Quit running engines and replace engine slots; position and history are unchanged.
-    pub fn begin_reload(&mut self, engine_names: Vec<String>) {
+    pub fn begin_reload(&mut self, engine_names: Vec<String>, multipv: u32) {
         self.quit_all_engines();
         self.engines = engine_names.into_iter().map(EngineState::new).collect();
+        self.multipv = multipv.max(1);
         self.status = "Starting engines…".into();
     }
 
     pub fn attach_engine(&mut self, index: usize, engine: UciEngine) {
         if let Some(slot) = self.engines.get_mut(index) {
+            engine.set_option("MultiPV", &self.multipv.to_string());
             engine.set_position_fen(&self.position.fen);
             slot.engine = Some(engine);
         }
@@ -207,6 +217,11 @@ impl App {
             return Ok(());
         }
 
+        if line.eq_ignore_ascii_case("multipv") || line.to_ascii_lowercase().starts_with("multipv ")
+        {
+            return self.set_multipv_from_input(&line);
+        }
+
         if line.to_ascii_lowercase().starts_with("load ") {
             let filename = line[5..].trim();
             if filename.is_empty() {
@@ -256,7 +271,7 @@ impl App {
         }
 
         Err(anyhow!(
-            "Unknown command. Use FEN, UCI move, config name, fen/move/back/-/console/load/go/stop/quit (empty = best move)"
+            "Unknown command. Use FEN, UCI move, config name, fen/move/back/-/console/multipv/load/go/stop/quit (empty = best move)"
         ))
     }
 
@@ -273,11 +288,63 @@ impl App {
         let total = self.engines.len();
         if ready == total {
             self.status =
-                "Ready. Enter FEN, UCI move, config name, or: fen/move/back/-/load/go/stop/quit (empty = best move)"
+                "Ready. Enter FEN, UCI move, config name, or: fen/move/back/-/multipv/load/go/stop/quit (empty = best move)"
                     .into();
         } else {
             self.status = format!("Starting engines… ({ready}/{total} ready)");
         }
+    }
+
+    fn set_multipv_from_input(&mut self, line: &str) -> Result<()> {
+        let lower = line.to_ascii_lowercase();
+        let arg = lower.strip_prefix("multipv").unwrap_or("").trim();
+        if arg.is_empty() {
+            self.status = if self.multipv <= 1 {
+                "MultiPV is off (1)".into()
+            } else {
+                format!("MultiPV is {}", self.multipv)
+            };
+            return Ok(());
+        }
+        if arg == "off" {
+            return self.apply_multipv(1);
+        }
+        let n: u32 = arg
+            .parse()
+            .map_err(|_| anyhow!("multipv requires a positive count (e.g. multipv 3)"))?;
+        if n == 0 {
+            return Err(anyhow!(
+                "multipv requires a positive count (e.g. multipv 3)"
+            ));
+        }
+        self.apply_multipv(n)
+    }
+
+    fn apply_multipv(&mut self, n: u32) -> Result<()> {
+        self.multipv = n;
+        if !self.any_engine_ready() {
+            self.status = if n <= 1 {
+                "MultiPV off (will apply when engines are ready)".into()
+            } else {
+                format!("MultiPV {n} (will apply when engines are ready)")
+            };
+            return Ok(());
+        }
+        for slot in &mut self.engines {
+            slot.clear_properties();
+            if let Some(engine) = &slot.engine {
+                engine.stop();
+                engine.set_option("MultiPV", &n.to_string());
+                engine.set_position_fen(&self.position.fen);
+                engine.go("");
+            }
+        }
+        self.status = if n <= 1 {
+            "MultiPV off; sent setoption MultiPV 1, go infinite".into()
+        } else {
+            format!("MultiPV {n}; sent setoption, go infinite")
+        };
+        Ok(())
     }
 
     fn clear_all_engine_properties(&mut self) {
@@ -377,6 +444,8 @@ fn is_explicit_command(line: &str) -> bool {
         || lower == "console"
         || lower == "console show"
         || lower == "console hide"
+        || lower == "multipv"
+        || lower.starts_with("multipv ")
         || lower == "load"
         || lower.starts_with("load ")
 }
@@ -449,10 +518,19 @@ pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     rows
 }
 
-/// Update `info` with key/value pairs from a UCI `info` line.
+/// Keys that belong to a specific MultiPV line rather than the overall search.
+fn is_pv_local_key(key: &str) -> bool {
+    matches!(
+        key,
+        "score" | "pv" | "depth" | "seldepth" | "wdl" | "multipv"
+    )
+}
+
+/// Update `info` / `pvs` with key/value pairs from a UCI `info` line.
 fn parse_info_line(
     line: &str,
     info: &mut BTreeMap<String, String>,
+    pvs: &mut BTreeMap<u32, BTreeMap<String, String>>,
     pv_first_move: &mut Option<String>,
 ) {
     let Some(rest) = line.strip_prefix("info ") else {
@@ -462,6 +540,8 @@ fn parse_info_line(
     let skip_pv_update = has_score_bound(&tokens);
     let mut line_time: Option<String> = None;
     let mut line_pv: Option<String> = None;
+    let mut multipv_index: u32 = 1;
+    let mut local: BTreeMap<String, String> = BTreeMap::new();
     let mut i = 0;
     while i < tokens.len() {
         let key = tokens[i];
@@ -471,13 +551,13 @@ fn parse_info_line(
         }
         if key == "score" {
             if let Some(value) = parse_score_tokens(&tokens, &mut i) {
-                info.insert("score".into(), value);
+                local.insert("score".into(), value);
             }
             continue;
         }
         if key == "wdl" {
             if let Some(value) = parse_wdl_tokens(&tokens, &mut i) {
-                info.insert("wdl".into(), value);
+                local.insert("wdl".into(), value);
             }
             continue;
         }
@@ -487,23 +567,50 @@ fn parse_info_line(
             if key == "time" {
                 line_time = Some(value.clone());
             }
-            info.insert(key.into(), value);
+            if key == "multipv"
+                && let Ok(n) = value.parse::<u32>()
+            {
+                multipv_index = n.max(1);
+            }
+            if is_pv_local_key(key) {
+                local.insert(key.into(), value);
+            } else {
+                info.insert(key.into(), value);
+            }
             i += 1;
         }
     }
 
-    if let Some(pv) = line_pv {
-        if let Some(first_move) = pv.split_whitespace().next() {
-            info.insert("bestmove".into(), first_move.into());
-            if pv_first_move.as_deref() != Some(first_move) {
-                *pv_first_move = Some(first_move.into());
-                if let Some(time) = line_time {
-                    info.insert("bestmovetime".into(), time);
-                }
+    let commit_to_pv = line_pv.is_some() || local.contains_key("score");
+    if commit_to_pv {
+        let entry = pvs.entry(multipv_index).or_default();
+        for (key, value) in local {
+            if key != "multipv" {
+                entry.insert(key, value);
             }
         }
-        if !skip_pv_update {
-            info.insert("pv".into(), pv);
+        if let Some(pv) = line_pv {
+            if let Some(first_move) = pv.split_whitespace().next() {
+                if multipv_index == 1 {
+                    info.insert("bestmove".into(), first_move.into());
+                    if pv_first_move.as_deref() != Some(first_move) {
+                        *pv_first_move = Some(first_move.into());
+                        if let Some(time) = line_time {
+                            info.insert("bestmovetime".into(), time);
+                        }
+                    }
+                }
+                entry.insert("bestmove".into(), first_move.into());
+            }
+            if !skip_pv_update {
+                entry.insert("pv".into(), pv);
+            }
+        }
+    } else {
+        for (key, value) in local {
+            if key != "multipv" {
+                info.insert(key, value);
+            }
         }
     }
 }
@@ -550,7 +657,7 @@ mod tests {
     use super::*;
 
     fn test_app() -> App {
-        App::new(vec!["Engine".into()])
+        App::new(vec!["Engine".into()], 1)
     }
 
     #[test]
@@ -608,9 +715,15 @@ mod tests {
     fn clear_engine_properties_resets_info_and_pv() {
         let mut app = test_app();
         app.engines[0].info.insert("depth".into(), "10".into());
+        app.engines[0]
+            .pvs
+            .entry(1)
+            .or_default()
+            .insert("score".into(), "cp 25".into());
         app.engines[0].pv_first_move = Some("e2e4".into());
         app.engines[0].clear_properties();
         assert!(app.engines[0].info.is_empty());
+        assert!(app.engines[0].pvs.is_empty());
         assert!(app.engines[0].pv_first_move.is_none());
     }
 
@@ -623,19 +736,50 @@ mod tests {
     #[test]
     fn parse_info_line_extracts_properties() {
         let mut info = BTreeMap::new();
+        let mut pvs = BTreeMap::new();
         let mut pv_first_move = None;
         parse_info_line(
             "info depth 12 seldepth 20 multipv 1 score cp 25 nodes 1000 nps 500000 time 500 pv e2e4 e7e5",
             &mut info,
+            &mut pvs,
             &mut pv_first_move,
         );
         assert_eq!(info.get("bestmovetime"), Some(&"500".into()));
-        assert_eq!(info.get("depth"), Some(&"12".into()));
-        assert_eq!(info.get("seldepth"), Some(&"20".into()));
-        assert_eq!(info.get("score"), Some(&"cp 25".into()));
+        assert_eq!(info.get("nodes"), Some(&"1000".into()));
+        assert_eq!(info.get("nps"), Some(&"500000".into()));
+        assert_eq!(info.get("bestmove"), Some(&"e2e4".into()));
+        let pv1 = pvs.get(&1).expect("pv 1");
+        assert_eq!(pv1.get("depth"), Some(&"12".into()));
+        assert_eq!(pv1.get("seldepth"), Some(&"20".into()));
+        assert_eq!(pv1.get("score"), Some(&"cp 25".into()));
+        assert_eq!(pv1.get("pv"), Some(&"e2e4 e7e5".into()));
+        assert_eq!(pv1.get("bestmove"), Some(&"e2e4".into()));
+    }
+
+    #[test]
+    fn parse_info_line_keeps_separate_multipv_entries() {
+        let mut info = BTreeMap::new();
+        let mut pvs = BTreeMap::new();
+        let mut pv_first_move = None;
+        parse_info_line(
+            "info depth 12 multipv 1 score cp 25 nodes 1000 time 500 pv e2e4 e7e5",
+            &mut info,
+            &mut pvs,
+            &mut pv_first_move,
+        );
+        parse_info_line(
+            "info depth 12 multipv 2 score cp 10 nodes 1000 time 500 pv d2d4 d7d5",
+            &mut info,
+            &mut pvs,
+            &mut pv_first_move,
+        );
         assert_eq!(info.get("bestmove"), Some(&"e2e4".into()));
         assert_eq!(info.get("nodes"), Some(&"1000".into()));
-        assert_eq!(info.get("pv"), Some(&"e2e4 e7e5".into()));
+        assert_eq!(pvs.get(&1).unwrap().get("score"), Some(&"cp 25".into()));
+        assert_eq!(pvs.get(&1).unwrap().get("pv"), Some(&"e2e4 e7e5".into()));
+        assert_eq!(pvs.get(&2).unwrap().get("score"), Some(&"cp 10".into()));
+        assert_eq!(pvs.get(&2).unwrap().get("pv"), Some(&"d2d4 d7d5".into()));
+        assert_eq!(pvs.get(&2).unwrap().get("bestmove"), Some(&"d2d4".into()));
     }
 
     #[test]
@@ -651,85 +795,108 @@ mod tests {
         );
         assert_eq!(app.engines[0].lines.len(), 3);
         assert_eq!(app.engines[0].info.get("depth"), Some(&"5".into()));
+        assert_eq!(app.engines[0].info.get("nodes"), Some(&"100".into()));
         assert_eq!(
-            app.engines[0].info.get("score"),
+            app.engines[0].pvs.get(&1).and_then(|p| p.get("score")),
             Some(&"cp 50 upperbound".into())
         );
         assert_eq!(app.engines[0].info.get("bestmove"), Some(&"e2e4".into()));
-        assert_eq!(app.engines[0].info.get("pv"), None);
+        assert_eq!(app.engines[0].pvs.get(&1).and_then(|p| p.get("pv")), None);
     }
 
     #[test]
     fn parse_info_line_upperbound_updates_score_and_bestmove_not_pv() {
         let mut info = BTreeMap::new();
+        let mut pvs = BTreeMap::new();
         let mut pv_first_move = None;
         parse_info_line(
             "info depth 10 score cp 50 upperbound time 100 pv e2e4 e7e5",
             &mut info,
+            &mut pvs,
             &mut pv_first_move,
         );
-        assert_eq!(info.get("score"), Some(&"cp 50 upperbound".into()));
+        assert_eq!(
+            pvs.get(&1).and_then(|p| p.get("score")),
+            Some(&"cp 50 upperbound".into())
+        );
         assert_eq!(info.get("bestmove"), Some(&"e2e4".into()));
         assert_eq!(info.get("bestmovetime"), Some(&"100".into()));
-        assert_eq!(info.get("pv"), None);
+        assert_eq!(pvs.get(&1).and_then(|p| p.get("pv")), None);
 
-        info.clear();
+        pvs.clear();
         parse_info_line(
             "info depth 11 score cp 30 pv d2d4 d7d5",
             &mut info,
+            &mut pvs,
             &mut pv_first_move,
         );
-        assert_eq!(info.get("pv"), Some(&"d2d4 d7d5".into()));
+        assert_eq!(
+            pvs.get(&1).and_then(|p| p.get("pv")),
+            Some(&"d2d4 d7d5".into())
+        );
         assert_eq!(info.get("bestmove"), Some(&"d2d4".into()));
     }
 
     #[test]
     fn parse_info_line_score_mate() {
         let mut info = BTreeMap::new();
+        let mut pvs = BTreeMap::new();
         let mut pv_first_move = None;
         parse_info_line(
             "info depth 20 score mate 3 pv e2e4",
             &mut info,
+            &mut pvs,
             &mut pv_first_move,
         );
-        assert_eq!(info.get("score"), Some(&"mate 3".into()));
+        assert_eq!(
+            pvs.get(&1).and_then(|p| p.get("score")),
+            Some(&"mate 3".into())
+        );
     }
 
     #[test]
     fn parse_info_line_wdl_joins_three_values() {
         let mut info = BTreeMap::new();
+        let mut pvs = BTreeMap::new();
         let mut pv_first_move = None;
         parse_info_line(
             "info depth 12 score cp 25 wdl 100 200 700 nodes 1000 pv e2e4",
             &mut info,
+            &mut pvs,
             &mut pv_first_move,
         );
-        assert_eq!(info.get("wdl"), Some(&"100 200 700".into()));
+        let pv1 = pvs.get(&1).unwrap();
+        assert_eq!(pv1.get("wdl"), Some(&"100 200 700".into()));
+        assert_eq!(pv1.get("score"), Some(&"cp 25".into()));
         assert_eq!(info.get("nodes"), Some(&"1000".into()));
-        assert_eq!(info.get("score"), Some(&"cp 25".into()));
     }
 
     #[test]
     fn parse_info_line_pv_is_rest_of_line() {
         let mut info = BTreeMap::new();
+        let mut pvs = BTreeMap::new();
         let mut pv_first_move = None;
         parse_info_line(
             "info depth 1 pv e2e4 e7e5 g1f3",
             &mut info,
+            &mut pvs,
             &mut pv_first_move,
         );
-        assert_eq!(info.get("depth"), Some(&"1".into()));
-        assert_eq!(info.get("pv"), Some(&"e2e4 e7e5 g1f3".into()));
+        let pv1 = pvs.get(&1).unwrap();
+        assert_eq!(pv1.get("depth"), Some(&"1".into()));
+        assert_eq!(pv1.get("pv"), Some(&"e2e4 e7e5 g1f3".into()));
     }
 
     #[test]
     fn bestmovetime_updates_when_pv_head_changes() {
         let mut info = BTreeMap::new();
+        let mut pvs = BTreeMap::new();
         let mut pv_first_move = None;
 
         parse_info_line(
             "info depth 10 time 100 pv e2e4",
             &mut info,
+            &mut pvs,
             &mut pv_first_move,
         );
         assert_eq!(info.get("bestmovetime"), Some(&"100".into()));
@@ -737,6 +904,7 @@ mod tests {
         parse_info_line(
             "info depth 11 time 200 pv e2e4 e7e5",
             &mut info,
+            &mut pvs,
             &mut pv_first_move,
         );
         assert_eq!(info.get("bestmovetime"), Some(&"100".into()));
@@ -744,6 +912,7 @@ mod tests {
         parse_info_line(
             "info depth 12 time 300 pv d2d4",
             &mut info,
+            &mut pvs,
             &mut pv_first_move,
         );
         assert_eq!(info.get("bestmovetime"), Some(&"300".into()));
@@ -803,6 +972,24 @@ mod tests {
             Path::new("stockfish.toml")
         );
         assert_eq!(resolve_load_path("engine.cfg"), Path::new("engine.cfg"));
+    }
+
+    #[test]
+    fn multipv_command_updates_setting_without_engines() {
+        let mut app = test_app();
+        assert_eq!(app.multipv, 1);
+        app.input = "multipv".into();
+        app.submit_input().unwrap();
+        assert!(app.status.contains("off"));
+
+        app.input = "multipv 3".into();
+        app.submit_input().unwrap();
+        assert_eq!(app.multipv, 3);
+        assert!(app.status.contains("3"));
+
+        app.input = "multipv off".into();
+        app.submit_input().unwrap();
+        assert_eq!(app.multipv, 1);
     }
 
     #[test]

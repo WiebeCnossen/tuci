@@ -73,6 +73,24 @@ impl Position {
         &self.board
     }
 
+    /// True when Black is to move.
+    pub fn black_to_move(&self) -> bool {
+        self.fen
+            .split_whitespace()
+            .nth(1)
+            .is_some_and(|color| color == "b")
+    }
+
+    /// Fullmove number from the FEN (defaults to 1).
+    pub fn fullmove_number(&self) -> u32 {
+        self.fen
+            .split_whitespace()
+            .nth(5)
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(1)
+            .max(1)
+    }
+
     /// Apply a move in UCI notation (e.g. `e2e4`, `e7e8q`) and return the resulting position.
     pub fn apply_uci_move(&self, uci_move: &str) -> Result<Self> {
         let fen: Fen = self.fen.parse().map_err(|e| anyhow!("invalid FEN: {e}"))?;
@@ -159,5 +177,18 @@ mod tests {
                 .starts_with("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR")
         );
         assert!(after.fen.contains(" b "));
+        assert!(after.black_to_move());
+        assert_eq!(after.fullmove_number(), 1);
+    }
+
+    #[test]
+    fn side_to_move_and_fullmove_from_fen() {
+        let start = Position::default();
+        assert!(!start.black_to_move());
+        assert_eq!(start.fullmove_number(), 1);
+
+        let mid = Position::from_fen(&format!("{BOARD} b KQkq - 0 12")).unwrap();
+        assert!(mid.black_to_move());
+        assert_eq!(mid.fullmove_number(), 12);
     }
 }

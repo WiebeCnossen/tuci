@@ -76,6 +76,10 @@ impl UciEngine {
         Ok(())
     }
 
+    pub fn set_option(&self, name: &str, value: &str) {
+        self.send(format!("setoption name {name} value {value}"));
+    }
+
     pub fn set_position_fen(&self, fen: &str) {
         self.send(format!("position fen {fen}"));
     }
