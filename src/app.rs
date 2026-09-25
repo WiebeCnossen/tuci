@@ -16,6 +16,15 @@ pub struct EngineState {
     /// Per-PV properties keyed by MultiPV index (1-based).
     pub pvs: BTreeMap<u32, BTreeMap<String, String>>,
     pv_first_move: Option<String>,
+    /// True after `go` until the matching `bestmove` (unless a restart already
+    /// issued another `go` while waiting for that `bestmove`).
+    searching: bool,
+    /// After stopping a live search, ignore `info` until `bestmove` so late lines
+    /// from the previous search cannot refill MultiPV slots. Not set when the
+    /// engine was idle — otherwise a new `go` would never refill properties.
+    suppress_info_properties: bool,
+    /// A `go` was sent while still waiting for the prior search's `bestmove`.
+    restart_pending: bool,
     engine: Option<UciEngine>,
 }
 
@@ -27,6 +36,9 @@ impl EngineState {
             info: BTreeMap::new(),
             pvs: BTreeMap::new(),
             pv_first_move: None,
+            searching: false,
+            suppress_info_properties: false,
+            restart_pending: false,
             engine: None,
         }
     }
@@ -37,12 +49,39 @@ impl EngineState {
         self.pv_first_move = None;
     }
 
+    /// Clear displayed properties. Suppress late info only if a search is live
+    /// (so a `bestmove` will arrive); idle engines refill on the next `info`.
+    fn begin_new_search(&mut self) {
+        self.suppress_info_properties = self.searching;
+        self.clear_properties();
+    }
+
+    /// Record that a `go` was sent. If we are still draining a prior search,
+    /// keep suppressing until its `bestmove`; otherwise accept info immediately.
+    fn note_go(&mut self) {
+        if self.suppress_info_properties {
+            self.restart_pending = true;
+        }
+        self.searching = true;
+    }
+
     fn push_lines(&mut self, lines: &[String]) {
         if lines.is_empty() {
             return;
         }
         for line in lines {
-            if line.starts_with("info ") && !should_skip_info_properties(line) {
+            if line.starts_with("bestmove ") {
+                self.suppress_info_properties = false;
+                if self.restart_pending {
+                    self.restart_pending = false;
+                    self.searching = true;
+                } else {
+                    self.searching = false;
+                }
+            } else if line.starts_with("info ")
+                && !self.suppress_info_properties
+                && !should_skip_info_properties(line)
+            {
                 parse_info_line(line, &mut self.info, &mut self.pvs, &mut self.pv_first_move);
             }
         }
@@ -263,7 +302,8 @@ impl App {
         if line.eq_ignore_ascii_case("go") || line.to_ascii_lowercase().starts_with("go ") {
             let args = line.strip_prefix("go").unwrap_or("").trim();
             for slot in &mut self.engines {
-                slot.pv_first_move = None;
+                slot.clear_properties();
+                slot.note_go();
                 if let Some(engine) = &slot.engine {
                     engine.go(args);
                 }
@@ -337,11 +377,16 @@ impl App {
             return Ok(());
         }
         for slot in &mut self.engines {
-            slot.clear_properties();
             if let Some(engine) = &slot.engine {
                 engine.stop();
+            }
+            slot.begin_new_search();
+            if let Some(engine) = &slot.engine {
                 engine.set_option("MultiPV", &n.to_string());
                 engine.set_position_fen(&self.position.fen);
+            }
+            slot.note_go();
+            if let Some(engine) = &slot.engine {
                 engine.go("");
             }
         }
@@ -351,12 +396,6 @@ impl App {
             format!("MultiPV {n}; sent setoption, go infinite")
         };
         Ok(())
-    }
-
-    fn clear_all_engine_properties(&mut self) {
-        for slot in &mut self.engines {
-            slot.clear_properties();
-        }
     }
 
     /// Stop search, discard prior engine info, set position, and start analysis.
@@ -375,15 +414,20 @@ impl App {
 
     fn set_position_on_engines(&mut self, position: Position, label: &str) -> Result<()> {
         let fen = position.fen.clone();
-        for slot in &self.engines {
+        for slot in &mut self.engines {
             if let Some(engine) = &slot.engine {
                 engine.stop();
             }
+            // Clear PVs immediately so MultiPV slots from the opponent's turn
+            // cannot linger when the new position has fewer legal moves.
+            slot.begin_new_search();
         }
-        self.clear_all_engine_properties();
-        for slot in &self.engines {
+        for slot in &mut self.engines {
             if let Some(engine) = &slot.engine {
                 engine.set_position_fen(&fen);
+            }
+            slot.note_go();
+            if let Some(engine) = &slot.engine {
                 engine.go("");
             }
         }
@@ -732,6 +776,68 @@ mod tests {
         assert!(app.engines[0].info.is_empty());
         assert!(app.engines[0].pvs.is_empty());
         assert!(app.engines[0].pv_first_move.is_none());
+    }
+
+    #[test]
+    fn begin_new_search_clears_pvs_and_ignores_stale_info_until_bestmove() {
+        let mut app = test_app();
+        app.engines[0].note_go();
+        app.push_engine_lines(
+            0,
+            &[
+                "info depth 10 multipv 1 score cp 20 pv e2e4".into(),
+                "info depth 10 multipv 2 score cp 10 pv d2d4".into(),
+                "info depth 10 multipv 3 score cp 5 pv c2c4".into(),
+            ],
+        );
+        assert_eq!(app.engines[0].pvs.len(), 3);
+
+        // A move stops the prior search and must drop all MultiPV slots so that
+        // when the new position has fewer legal moves, opponent lines cannot linger.
+        app.engines[0].begin_new_search();
+        app.engines[0].note_go();
+        assert!(app.engines[0].pvs.is_empty());
+        assert!(app.engines[0].suppress_info_properties);
+
+        app.push_engine_lines(
+            0,
+            &["info depth 11 multipv 3 score cp 5 pv g7g5 g2g4".into()],
+        );
+        assert!(
+            app.engines[0].pvs.is_empty(),
+            "stale info after stop must not refill PVs"
+        );
+
+        app.push_engine_lines(0, &["bestmove e2e4".into()]);
+        app.push_engine_lines(
+            0,
+            &[
+                "info depth 1 multipv 1 score cp 10 pv e7e5".into(),
+                "info depth 1 multipv 2 score cp 5 pv c7c5".into(),
+            ],
+        );
+        assert_eq!(app.engines[0].pvs.len(), 2);
+        assert!(!app.engines[0].pvs.contains_key(&3));
+        assert_eq!(
+            app.engines[0].pvs.get(&1).and_then(|p| p.get("pv")),
+            Some(&"e7e5".into())
+        );
+    }
+
+    #[test]
+    fn begin_new_search_while_idle_refills_without_waiting_for_bestmove() {
+        let mut app = test_app();
+        // Engine was not searching (e.g. after stop, or before first go).
+        app.engines[0].begin_new_search();
+        app.engines[0].note_go();
+        assert!(!app.engines[0].suppress_info_properties);
+
+        app.push_engine_lines(0, &["info depth 1 multipv 1 score cp 10 pv e7e5".into()]);
+        assert_eq!(
+            app.engines[0].pvs.get(&1).and_then(|p| p.get("pv")),
+            Some(&"e7e5".into()),
+            "idle restart must accept info immediately"
+        );
     }
 
     #[test]
