@@ -69,11 +69,20 @@ fn format_property_value(key: &str, value: &str) -> String {
         "score" => format_score_human(value),
         "wdl" => format_wdl_human(value),
         "time" | "bestmovetime" => format_time_human(value),
+        "hashfull" => format_hashfull_human(value),
         _ => value
             .parse::<i64>()
             .map(format_si_number)
             .unwrap_or_else(|_| value.to_string()),
     }
+}
+
+fn format_hashfull_human(value: &str) -> String {
+    // UCI hashfull is permille of hash table occupancy.
+    value
+        .parse::<i64>()
+        .map(|n| format!("{:.1}%", n as f64 / 10.0))
+        .unwrap_or_else(|_| value.to_string())
 }
 
 fn format_score_human(value: &str) -> String {
@@ -555,6 +564,7 @@ mod tests {
         assert_eq!(format_property_value("time", "500"), "500 ms");
         assert_eq!(format_property_value("time", "1500"), "1.50 s");
         assert_eq!(format_property_value("nodes", "1000"), "1k");
+        assert_eq!(format_property_value("hashfull", "134"), "13.4%");
         assert_eq!(format_property_value("bestmove", "e2e4"), "e2e4");
     }
 
@@ -596,7 +606,8 @@ mod tests {
                 "info depth 12 seldepth 18 multipv 2 score cp 10 nodes 1000 time 500 pv d2d4 d7d5".into(),
             ],
         );
-        let lines = engine_property_lines(&app.engines[0], &app.position);
+        // Use start position so move numbers are stable (App::new may restore a session FEN).
+        let lines = engine_property_lines(&app.engines[0], &crate::fen::Position::default());
         assert!(lines.iter().any(|l| l.starts_with("best move: e2e4")));
         assert!(lines.iter().any(|l| l.starts_with("nodes: 1k")));
         assert!(
